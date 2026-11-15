@@ -144,7 +144,11 @@ plugin_apply() {
 
     if [ "$_p01_need_clear" = "1" ]; then
         # Inject a one-shot cache clear into stage_1.sh (runs before settings service)
-        if [ -f "$_p01_stage1" ] && ! grep -q "$_p01_marker_begin" "$_p01_stage1"; then
+        if [ ! -f "$_p01_stage1" ]; then
+            nd2cn_log "ERROR: $_p01_stage1 not found — cannot inject cache clear"
+        elif grep -q "$_p01_marker_begin" "$_p01_stage1"; then
+            nd2cn_log "cache clear already injected in stage_1.sh"
+        else
             nd2cn_backup_file "$_p01_stage1" "$P01_TAG" || true
             _p01_s1_staged=$(nd2cn_stage_file "$_p01_stage1") || true
             if [ -n "$_p01_s1_staged" ]; then
@@ -164,8 +168,6 @@ CACHEEOF
                 nd2cn_publish_file "$_p01_s1_staged" 2>/dev/null && \
                     nd2cn_log "injected cache clear into stage_1.sh (runs before settings service on next boot)"
             fi
-        elif [ -f "$_p01_flag" ]; then
-            nd2cn_log "cache already cleared on a previous boot (flag exists)"
         fi
     else
         nd2cn_log "already applied"
@@ -198,6 +200,19 @@ plugin_remove() {
         *) _p01_rc=1 ;;
     esac
 
-    # The settings cache is not wiped here either (see the header comment).
+    # Clean up stage_1.sh injection and flag file
+    _p01_stage1="$FIRMWARE_ROOT/jci/scripts/stage_1.sh"
+    _p01_marker_begin="# BEGIN nd2cn-cache-clear"
+    _p01_marker_end="# END nd2cn-cache-clear"
+    if [ -f "$_p01_stage1" ] && grep -q "$_p01_marker_begin" "$_p01_stage1"; then
+        _p01_s1_staged=$(nd2cn_stage_file "$_p01_stage1") || true
+        if [ -n "$_p01_s1_staged" ]; then
+            sed -i "/$_p01_marker_begin/,/$_p01_marker_end/d" "$_p01_s1_staged"
+            nd2cn_publish_file "$_p01_s1_staged" 2>/dev/null && \
+                nd2cn_log "removed cache clear block from stage_1.sh"
+        fi
+    fi
+    rm -f "$ND2CN_DIR/lang-cache-cleared" 2>/dev/null
+
     return $_p01_rc
 }
