@@ -119,28 +119,53 @@ plugin_apply() {
     fi
 
     # ── 4. Clear settings cache so the service re-reads the modified XML ──
-    # The settings service caches XML values in .bin files under /data/com/jci/cpp/settings/.
-    # Without clearing these, the modified XML values (language, units) are never loaded.
-    # ALWAYS clear if the XML has our modifications, even if unchanged this run —
-    # a previous install may have modified XML without clearing the cache.
+    # The settings service caches XML in .bin files under /data/com/jci/cpp/settings/.
+    # Without clearing, the new language/unit values never load.
+    # The running service regenerates .bin immediately after deletion from its
+    # in-memory state, so the actual clear must happen at NEXT BOOT before the
+    # service starts. We inject a one-shot clear into stage_1.sh (runs before
+    # the settings service in sm.conf). A flag file tracks whether we've already
+    # done this so repeat installs don't reset user prefs every time.
     _p01_cache="$FIRMWARE_ROOT/data/com/jci/cpp/settings"
+    _p01_flag="$ND2CN_DIR/lang-cache-cleared"
+    _p01_stage1="$FIRMWARE_ROOT/jci/scripts/stage_1.sh"
+    _p01_marker_begin="# BEGIN nd2cn-cache-clear"
+    _p01_marker_end="# END nd2cn-cache-clear"
+
     _p01_need_clear=0
     if [ "$_p01_changed" = "1" ]; then
+        # XML changed this run — must clear cache
         _p01_need_clear=1
-    elif grep -q "Simplified Chinese" "$P01_CMU_XML" 2>/dev/null && [ -d "$_p01_cache" ]; then
-        # XML already patched but cache might be stale from a previous failed install
-        _p01_bin_count=$(find "$_p01_cache" -name "*.bin" 2>/dev/null | wc -l)
-        if [ "$_p01_bin_count" -gt 0 ]; then
-            nd2cn_log "XML already patched but $_p01_bin_count cache files exist — clearing"
-            _p01_need_clear=1
-        fi
+    elif grep -q "Simplified Chinese" "$P01_CMU_XML" 2>/dev/null && [ ! -f "$_p01_flag" ]; then
+        # XML was patched by a previous install that didn't clear cache
+        nd2cn_log "XML already patched but cache never cleared — scheduling clear"
+        _p01_need_clear=1
     fi
+
     if [ "$_p01_need_clear" = "1" ]; then
-        if [ -d "$_p01_cache" ]; then
-            _p01_count=$(find "$_p01_cache" -name "*.bin" 2>/dev/null | wc -l)
-            rm -f "$_p01_cache"/*.bin 2>/dev/null
-            nd2cn_log "cleared $_p01_count settings cache files (required for XML changes to take effect)"
-            nd2cn_log "NOTE: user preferences (audio, display, etc.) will reset to defaults on next boot"
+        # Inject a one-shot cache clear into stage_1.sh (runs before settings service)
+        if [ -f "$_p01_stage1" ] && ! grep -q "$_p01_marker_begin" "$_p01_stage1"; then
+            nd2cn_backup_file "$_p01_stage1" "$P01_TAG" || true
+            _p01_s1_staged=$(nd2cn_stage_file "$_p01_stage1") || true
+            if [ -n "$_p01_s1_staged" ]; then
+                cat >> "$_p01_s1_staged" << CACHEEOF
+
+$_p01_marker_begin
+# One-shot settings cache clear — runs once before the settings service starts.
+# Ensures the modified maz_cmu-root.xml language values take effect.
+_nd2cn_cc="$_p01_cache"
+_nd2cn_cf="$_p01_flag"
+if [ ! -f "\$_nd2cn_cf" ] && [ -d "\$_nd2cn_cc" ]; then
+    rm -f "\$_nd2cn_cc"/*.bin 2>/dev/null
+    echo "cleared" > "\$_nd2cn_cf"
+fi
+$_p01_marker_end
+CACHEEOF
+                nd2cn_publish_file "$_p01_s1_staged" 2>/dev/null && \
+                    nd2cn_log "injected cache clear into stage_1.sh (runs before settings service on next boot)"
+            fi
+        elif [ -f "$_p01_flag" ]; then
+            nd2cn_log "cache already cleared on a previous boot (flag exists)"
         fi
     else
         nd2cn_log "already applied"

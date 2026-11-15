@@ -285,10 +285,15 @@ else
     _reboot_txt="Reboot the system to finish."
 fi
 
+# ── Copy log to USB BEFORE showing the dialog ──
+# (user will remove USB when they see "Please remove USB drive")
+_nd2cn_copy_log_to_usb
+sync
+
 # ── Completion dialog (never claims "complete" after a failed finalize) ──
 if [ "$_fin_rc" != "1" ]; then
     _done_txt="Installation complete!\n\n$_ok OK, $_skipped skipped, $_failed failed."
-    [ "$_failed" != "0" ] && _done_txt="$_done_txt\nLog: /data/nd2cn/nd2cn.log"
+    [ "$_failed" != "0" ] && _done_txt="$_done_txt\nLog: nd2cn-install.log on USB"
     [ "$_fin_rc" = "2" ] && _done_txt="$_done_txt\n\n$(nd2cn_finalize_problem_text)"
     _done_txt="$_done_txt\n\n$_reboot_txt"
     if nd2cn_applied_has "01-chinese-language.sh"; then
@@ -297,10 +302,10 @@ if [ "$_fin_rc" != "1" ]; then
     nd2cn_dialog_ok "nd2cn" "$_done_txt"
 else
     nd2cn_log "ERROR: finalize failed — install is NOT reported as complete"
-    nd2cn_dialog_ok "nd2cn ERROR" "Installation NOT finalized.\n\n$_ok OK, $_skipped skipped, $_failed failed.\n$(nd2cn_finalize_problem_text)\nLog: /data/nd2cn/nd2cn.log\n\n$_reboot_txt"
+    nd2cn_dialog_ok "nd2cn ERROR" "Installation NOT finalized.\n\n$_ok OK, $_skipped skipped, $_failed failed.\n$(nd2cn_finalize_problem_text)\nLog: nd2cn-install.log on USB\n\n$_reboot_txt"
 fi
 
-# ── Copy log to USB for debugging ──
+# ── (log already copied above; this is a no-op safety net) ──
 if [ -f "$ND2CN_LOG" ]; then
     cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null && \
         nd2cn_log "install log copied to USB: nd2cn-install.log"
