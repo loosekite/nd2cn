@@ -72,7 +72,18 @@ nd2cn_log "--- END SYSTEM PROBE ---"
 
 # Helper: copy log to USB before exiting (best-effort)
 _nd2cn_copy_log_to_usb() {
-    [ -f "$ND2CN_LOG" ] && cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null
+    [ -f "$ND2CN_LOG" ] || return 0
+    # Try writing directly first
+    if cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null; then
+        return 0
+    fi
+    # USB might be mounted read-only by the media manager — try remounting rw
+    _usb_dev=$(mount | grep "$REPO_DIR" | awk '{print $1}' | head -1)
+    if [ -n "$_usb_dev" ]; then
+        mount -o rw,remount "$_usb_dev" "$REPO_DIR" 2>/dev/null || \
+        mount -o rw,remount "$REPO_DIR" 2>/dev/null
+        cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null
+    fi
 }
 
 # ── Firmware check ──

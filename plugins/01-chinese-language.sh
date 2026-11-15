@@ -121,9 +121,21 @@ plugin_apply() {
     # ── 4. Clear settings cache so the service re-reads the modified XML ──
     # The settings service caches XML values in .bin files under /data/com/jci/cpp/settings/.
     # Without clearing these, the modified XML values (language, units) are never loaded.
-    # This was confirmed on real hardware: without cache clear, language menu stays unchanged.
+    # ALWAYS clear if the XML has our modifications, even if unchanged this run —
+    # a previous install may have modified XML without clearing the cache.
+    _p01_cache="$FIRMWARE_ROOT/data/com/jci/cpp/settings"
+    _p01_need_clear=0
     if [ "$_p01_changed" = "1" ]; then
-        _p01_cache="$FIRMWARE_ROOT/data/com/jci/cpp/settings"
+        _p01_need_clear=1
+    elif grep -q "Simplified Chinese" "$P01_CMU_XML" 2>/dev/null && [ -d "$_p01_cache" ]; then
+        # XML already patched but cache might be stale from a previous failed install
+        _p01_bin_count=$(find "$_p01_cache" -name "*.bin" 2>/dev/null | wc -l)
+        if [ "$_p01_bin_count" -gt 0 ]; then
+            nd2cn_log "XML already patched but $_p01_bin_count cache files exist — clearing"
+            _p01_need_clear=1
+        fi
+    fi
+    if [ "$_p01_need_clear" = "1" ]; then
         if [ -d "$_p01_cache" ]; then
             _p01_count=$(find "$_p01_cache" -name "*.bin" 2>/dev/null | wc -l)
             rm -f "$_p01_cache"/*.bin 2>/dev/null
