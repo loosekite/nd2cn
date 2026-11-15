@@ -290,6 +290,37 @@ fi
 _nd2cn_copy_log_to_usb
 sync
 
+# ── Diagnostic dialog: show key info on screen for photo capture ──
+_diag=""
+_diag="$_diag\nXML:"
+if grep -q "Simplified Chinese" /jci/settings/configurations/maz_cmu-root.xml 2>/dev/null; then
+    _diag="$_diag HAS Chinese"
+else
+    _diag="$_diag NO Chinese!"
+fi
+_diag="$_diag\nBIN:"
+_bin_count=$(find /data/com/jci/cpp/settings -name "*.bin" 2>/dev/null | wc -l)
+_diag="$_diag ${_bin_count} files"
+_diag="$_diag\nSTG1:"
+if grep -q "nd2cn-cache-clear" /jci/scripts/stage_1.sh 2>/dev/null; then
+    _diag="$_diag injected"
+else
+    _diag="$_diag not injected"
+fi
+_diag="$_diag\nFLAG:"
+if [ -f /data/nd2cn/lang-cache-cleared ]; then
+    _diag="$_diag exists"
+else
+    _diag="$_diag none"
+fi
+_diag="$_diag\nUSB log:"
+if [ -f "$REPO_DIR/nd2cn-install.log" ]; then
+    _diag="$_diag written"
+else
+    _diag="$_diag FAILED"
+fi
+nd2cn_dialog_ok "nd2cn DIAG" "$_diag" 15
+
 # ── Completion dialog (never claims "complete" after a failed finalize) ──
 if [ "$_fin_rc" != "1" ]; then
     _done_txt="Installation complete!\n\n$_ok OK, $_skipped skipped, $_failed failed."
