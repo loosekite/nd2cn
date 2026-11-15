@@ -118,9 +118,18 @@ plugin_apply() {
         fi
     fi
 
-    # ── 4. No cache wipe: the settings service re-parses the changed XML ──
+    # ── 4. Clear settings cache so the service re-reads the modified XML ──
+    # The settings service caches XML values in .bin files under /data/com/jci/cpp/settings/.
+    # Without clearing these, the modified XML values (language, units) are never loaded.
+    # This was confirmed on real hardware: without cache clear, language menu stays unchanged.
     if [ "$_p01_changed" = "1" ]; then
-        nd2cn_log "settings XML changed (re-parsed by the settings service at next boot; user settings cache kept)"
+        _p01_cache="/data/com/jci/cpp/settings"
+        if [ -d "$_p01_cache" ]; then
+            _p01_count=$(find "$_p01_cache" -name "*.bin" 2>/dev/null | wc -l)
+            rm -f "$_p01_cache"/*.bin 2>/dev/null
+            nd2cn_log "cleared $_p01_count settings cache files (required for XML changes to take effect)"
+            nd2cn_log "NOTE: user preferences (audio, display, etc.) will reset to defaults on next boot"
+        fi
     else
         nd2cn_log "already applied"
     fi

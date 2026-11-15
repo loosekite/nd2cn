@@ -646,10 +646,11 @@ nd2cn_unregister_gui_script() {
 nd2cn_dialog_ok() {
     _title="$1"
     _text="$2"
+    _timeout="${3:-10}"
     if [ -x "$JCI_DIALOG" ]; then
         killall jci-dialog 2>/dev/null || :
         "$JCI_DIALOG" --info --title="$_title" --text="$_text" --ok-label="OK" &
-        sleep 3
+        sleep "$_timeout"
         killall jci-dialog 2>/dev/null || :
     fi
 }

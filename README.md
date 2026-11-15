@@ -97,8 +97,10 @@ echo "nd2cn" > /mnt/usb/ND2CN.ID
 
 ```bash
 # Linux / macOS 终端执行（USB 挂载在 /mnt/usb）：
-touch '/mnt/usb/$(N=0;for D in sda1 sdb1 sdc1 sdd1;do M=/tmp/mnt/usb_$D;[ -f $M/ND2CN.ID ]&&sh $M/install.sh&&N=1&&break;done;[ $N = 1 ]).up'
+touch '/mnt/usb/$(N=0;for i in 1 2 3 4 5 6 7 8 9 10;do cd ..;done;cd tmp;cd mnt;for D in sda1 sdb1 sdc1 sdd1 usb_sda1 usb_sdb1 usb_sdc1 usb_sdd1;do (cd $D&&[ -f ND2CN.ID ]&&sh install.sh)&&N=1&&break;done;[ $N = 1 ]).up'
 ```
+
+> **重要**：文件名不能包含 `/` 字符（这是所有文件系统的限制），所以用 `cd ..` 逐级回退到根目录再 `cd tmp;cd mnt` 进入目标路径，而不是写 `/tmp/mnt/`。
 
 > **注意**：文件名必须用**单引号**包裹防止本机 shell 展开。这个文件的内容为空——起作用的是文件名。
 
@@ -146,11 +148,10 @@ cp ~/.ssh/id_rsa.pub /mnt/usb/resources/ssh_keys/
 使用同一张 USB 盘：
 
 ```bash
-# 编辑触发文件名，把 install.sh 改成 uninstall.sh：
-# 删除旧的 .up 文件，创建新的：
-rm '/mnt/usb/$(N=0;for D in sda1 sdb1 sdc1 sdd1;do M=/tmp/mnt/usb_$D;[ -f $M/ND2CN.ID ]&&sh $M/install.sh&&N=1&&break;done;[ $N = 1 ]).up'
+# 删除安装用的 .up 文件，创建卸载用的：
+rm '/mnt/usb/$(N=0;for i in 1 2 3 4 5 6 7 8 9 10;do cd ..;done;cd tmp;cd mnt;for D in sda1 sdb1 sdc1 sdd1 usb_sda1 usb_sdb1 usb_sdc1 usb_sdd1;do (cd $D&&[ -f ND2CN.ID ]&&sh install.sh)&&N=1&&break;done;[ $N = 1 ]).up'
 
-touch '/mnt/usb/$(N=0;for D in sda1 sdb1 sdc1 sdd1;do M=/tmp/mnt/usb_$D;[ -f $M/ND2CN.ID ]&&sh $M/uninstall.sh&&N=1&&break;done;[ $N = 1 ]).up'
+touch '/mnt/usb/$(N=0;for i in 1 2 3 4 5 6 7 8 9 10;do cd ..;done;cd tmp;cd mnt;for D in sda1 sdb1 sdc1 sdd1 usb_sda1 usb_sdb1 usb_sdc1 usb_sdd1;do (cd $D&&[ -f ND2CN.ID ]&&sh uninstall.sh)&&N=1&&break;done;[ $N = 1 ]).up'
 ```
 
 插入车机，等待卸载完成并重启。所有修改将恢复到原厂状态。

@@ -15,7 +15,7 @@
 # Successfully applied plugins are recorded in /data/nd2cn/applied_plugins.txt
 # and a copy of each attempted plugin is kept in /data/nd2cn/plugins/ so that
 # uninstall.sh works even with a different USB stick.
-# Nothing is ever written to the USB stick; the log is /data/nd2cn/nd2cn.log.
+# A copy of the install log is written to the USB stick for debugging.
 
 REPO_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$REPO_DIR/lib/helpers.sh"
@@ -253,8 +253,14 @@ else
     nd2cn_dialog_ok "nd2cn ERROR" "Installation NOT finalized.\n\n$_ok OK, $_skipped skipped, $_failed failed.\n$(nd2cn_finalize_problem_text)\nLog: /data/nd2cn/nd2cn.log\n\n$_reboot_txt"
 fi
 
+# ── Copy log to USB for debugging ──
+if [ -f "$ND2CN_LOG" ]; then
+    cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null && \
+        nd2cn_log "install log copied to USB: nd2cn-install.log"
+fi
+
 if [ "$ND2CN_REBOOT" = "1" ]; then
-    sleep 3
+    sleep 5
     nd2cn_safe_reboot
 fi
 [ "$_failed" = "0" ] && [ "$_fin_rc" != "1" ]
