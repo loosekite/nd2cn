@@ -70,9 +70,15 @@ nd2cn_log "Language XML current: $(grep LanguageDisplayStrings /jci/settings/con
 nd2cn_log "USB contents: $(ls "$REPO_DIR"/plugins/*.sh 2>/dev/null | wc -l) plugins, $(ls "$REPO_DIR"/plugins/optional/*.sh 2>/dev/null | wc -l) optional"
 nd2cn_log "--- END SYSTEM PROBE ---"
 
+# Helper: copy log to USB before exiting (best-effort)
+_nd2cn_copy_log_to_usb() {
+    [ -f "$ND2CN_LOG" ] && cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null
+}
+
 # ── Firmware check ──
 if ! nd2cn_check_firmware; then
     nd2cn_dialog_ok "nd2cn" "Unsupported firmware.\nOnly 74.00.324/324A is supported.\n\nNo changes were made."
+    _nd2cn_copy_log_to_usb
     exit 1
 fi
 
@@ -81,6 +87,7 @@ WORK="${TMPDIR:-/tmp}/nd2cn.$$"
 rm -rf "$WORK"
 if ! mkdir -p "$WORK/src"; then
     nd2cn_log "FATAL: cannot create work dir $WORK"
+    _nd2cn_copy_log_to_usb
     exit 1
 fi
 QUEUE="$WORK/queue"       # file|name|risk|desc, in execution order
@@ -118,6 +125,7 @@ nd2cn_log "Found $_total plugin(s) in $PLUGIN_DIR ($_invalid invalid)"
 if [ "$_total" = "0" ]; then
     nd2cn_dialog_ok "nd2cn" "No plugins found in plugins/ on the USB drive.\n\nNo changes were made."
     rm -rf "$WORK"
+    _nd2cn_copy_log_to_usb
     exit 0
 fi
 
@@ -144,6 +152,7 @@ else
         nd2cn_log "FATAL: cannot prepare rootfs for modification"
         nd2cn_dialog_ok "nd2cn ERROR" "Cannot modify system files.\nNo changes were made."
         rm -rf "$WORK"
+        _nd2cn_copy_log_to_usb
         exit 1
     fi
     mkdir -p "$ND2CN_BACKUP_DIR" "$ND2CN_PLUGIN_STORE"
@@ -232,6 +241,7 @@ done
 if [ "$ND2CN_CHECK_MODE" = "1" ]; then
     rm -rf "$WORK"
     nd2cn_dialog_ok "nd2cn check" "Check complete.\n\n$_ok OK, $_skipped would be skipped, $_invalid invalid.\n\nLog: /data/nd2cn/nd2cn.log"
+    _nd2cn_copy_log_to_usb
     exit 0
 fi
 

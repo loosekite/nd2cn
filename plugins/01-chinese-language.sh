@@ -123,7 +123,7 @@ plugin_apply() {
     # Without clearing these, the modified XML values (language, units) are never loaded.
     # This was confirmed on real hardware: without cache clear, language menu stays unchanged.
     if [ "$_p01_changed" = "1" ]; then
-        _p01_cache="/data/com/jci/cpp/settings"
+        _p01_cache="$FIRMWARE_ROOT/data/com/jci/cpp/settings"
         if [ -d "$_p01_cache" ]; then
             _p01_count=$(find "$_p01_cache" -name "*.bin" 2>/dev/null | wc -l)
             rm -f "$_p01_cache"/*.bin 2>/dev/null
