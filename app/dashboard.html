@@ -1,0 +1,1554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    nd2cn Track Dash  (赛道仪表)
+    Track-day dashboard for the Mazda MX-5 ND2 infotainment unit (CMU, 800x480).
+
+    Runs inside Opera Presto 12: ES5 only, no flexbox, no webfonts
+    (opera.ini has "Enable Webfonts=0"; "Tipperary" is a system font).
+    Shown by dashboard-loader.js in an iframe below the 64 px status bar, so
+    the page itself is 800x416.
+
+    The panel is 7 inches at ~133 dpi and is read at arm's length in a moving
+    car, so this is a glance instrument: nothing read while driving is under 18 px (20 px
+    for Chinese), state is carried by thick blocks of colour, and the only
+    text on a gauge is the "1g" that names the ring of the friction circle.
+
+    Three views, chosen automatically from the driving state. Each one shows
+    everything its situation needs, so that no input is ever required to find
+    a value:
+        STANDBY  standing still (3 s): coolant, huge, with its state in a word
+                 (COLD / WARMING / NORMAL / HOT / OVERHEAT), gear, rpm number
+                 and bar, outside temperature; in the strip the session timer,
+                 the session's peak g, and green / grey / red tell-tales for
+                 oil pressure and charging
+        STREET   moving: speed, huge, gear, rpm bar; in the strip coolant
+                 (number and colour bar) and outside temperature
+        TRACK    above 0.55 g or 5500 r/min for 0.8 s; left again after 12 s
+                 below 0.3 g and 4000 r/min. Friction circle with trail and
+                 peak marks, the pedals right beside it (brake red, throttle
+                 green), g now and peak g; speed, gear, rpm bar and number,
+                 coolant; in the strip GPS speed, steering angle, session timer
+
+    Warnings (oil pressure, charging, coolant above 112 C) take over the
+    bottom strip as red blocks in every view and light a red bar along the top
+    edge. They blink at 1 Hz for five seconds, then stay lit. Oil and charging
+    are ignored while the engine is known to be stopped, when both lamps are
+    lit on any car. Nothing on this page flashes faster than 3 Hz.
+
+    Data: /tmp/nd2cn/dashboard.json, written ~20x per second by
+    dashboard-daemon.sh. Every value may be null, and two of them matter on
+    firmware 74.00.324A: outside temperature has no source there, so
+    "ambient" is always null and its cell stays hidden; coolant is not on
+    D-Bus and is read from the shared memory database every 2 s. Should that
+    fail, coolant shows "--" and no state word, and the over-temperature
+    warning cannot fire; everything else carries on. The gear comes as
+    "gear" (manual), "lever" (automatic) and "gearbox", see gearText(). After 0.6 s without a new
+    sample the values turn grey (NO DATA), after 2 s they are blanked
+    (OFFLINE). The page never writes anything anywhere; all state lives in
+    memory and is gone at power-off.
+
+    URL options (after #, separated by &):
+        demo        synthetic data, no daemon needed (bench testing)
+        raw         open the calibration panel at start
+        view=track  start locked in one view (standby | street | track)
+        alert       with demo: show the warning blocks
+        lang=zh_CN  force the label language (normally taken from the system)
+        data=URL    read the JSON from another URL
+
+    Controls. Every commander input has one meaning in every state, so it can
+    be worked without looking. Touch does the same things.
+        rotate          / swipe left-right    next / previous view, locked
+        tilt up                               TRACK view, now, locked
+        tilt down       / tap the status cell back to automatic
+        press, press    / tap, tap            reset peak g and timer (the first
+                                              press asks, 3 s to confirm)
+        Back            / tap  <              close
+        tilt left-right / tap the status cell calibration panel on / off;
+                          (while automatic)   it only opens standing still
+-->
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Track Dash</title>
+<style>
+html, body {
+    margin: 0; padding: 0;
+    width: 800px; height: 416px;
+    overflow: hidden;
+    background: #050707;
+}
+body {
+    color: #ffffff;
+    font-family: "Tipperary", Arial, Helvetica, sans-serif;
+    font-size: 18px;
+    line-height: 1;
+    cursor: default;
+}
+#app {
+    position: absolute; left: 0; top: 0;
+    width: 800px; height: 416px;
+    overflow: hidden;
+    /* the factory wallpaper, shifted up by the status bar height */
+    background: #050707 url("file:///jci/gui/common/images/background.png") 0 -64px no-repeat;
+}
+#veil  { position: absolute; left: 0; top: 0; width: 800px; height: 416px; background: rgba(4, 7, 7, 0.62); }
+#strip { position: absolute; left: 0; top: 336px; width: 800px; height: 78px;
+         background: rgba(0, 0, 0, 0.46); border-top: 2px solid rgba(255, 255, 255, 0.10); }
+#app div, #app span, #app canvas { position: absolute; }
+#app span.s, #app span.d, #app span.p, #app span.al { position: static; }
+
+/* which view shows what: vT = track, vS = street, vB = standby */
+#app .vT, #app .vS, #app .vB { display: none; }
+#app.m-track .vT, #app.m-street .vS, #app.m-standby .vB { display: block; }
+
+/* section label. Chinese is set larger than English: a hanzi has more strokes
+   than a capital letter and needs the extra pixels at the same distance. */
+.lb { height: 24px; line-height: 24px; font-size: 20px; letter-spacing: 2px; color: #b4b7ba; white-space: nowrap; }
+.en .lb { font-size: 18px; }
+
+/* numbers: every glyph sits in a fixed-width cell (tabular figures) */
+.num  { white-space: nowrap; font-weight: bold; }
+.d    { display: inline-block; width: 0.58em; text-align: center; }
+.p    { display: inline-block; width: 0.32em; text-align: center; }
+.unit { font-size: 18px; font-weight: normal; color: #b4b7ba; letter-spacing: 1px; white-space: nowrap; margin-left: 6px; }
+
+.cWhite { color: #ffffff; }
+.cDim   { color: #55585a; }
+.cCold  { color: #5aa8ff; }
+.cAmber { color: #f89c1e; }
+.cRed   { color: #ff2801; }
+
+/* Samples stopped arriving (but not yet for long enough to blank the
+   screen): what is shown is old, so it loses its white. */
+#app.stale #spdV, #app.stale #rpmV, #app.stale #gearV, #app.stale #coolV,
+#app.stale #gTotV, #app.stale #gpsV, #app.stale #stV, #app.stale #ambV { color: #7d8083; }
+
+/* ── friction circle ── */
+#gBg, #gFg { left: 12px; top: 4px; }
+#gTot  { left: 16px; top: 266px; width: 170px; height: 60px; white-space: nowrap; }
+#gTotV { font-size: 56px; line-height: 60px; }
+#gTot .unit { font-size: 24px; }
+#gMaxL { left: 222px; top: 266px; width: 120px; text-align: right; }
+#gMax  { left: 222px; top: 291px; width: 120px; height: 34px; text-align: right; font-size: 32px; line-height: 34px; }
+
+/* ── pedals: right beside the circle, so that what the feet do and what
+      the car does with it are read in one glance ── */
+#ped   { left: 284px; top: 14px; }
+
+/* ── engine speed bar: top right (track), full width (street), under the
+      rpm number (standby) ── */
+#rpm { left: 360px; top: 14px; }
+
+/* ── speed, gear ── */
+#spdL { left: 360px; top: 68px; }
+#spdV { left: 360px; top: 90px; width: 216px; height: 120px; text-align: right;
+        font-size: 120px; line-height: 120px; }
+#spdU { left: 580px; top: 180px; font-size: 20px; }
+#gearBox { left: 644px; top: 72px; width: 140px; height: 142px; background: rgba(255, 255, 255, 0.07); }
+#gearL   { left: 0; top: 7px; width: 140px; text-align: center; text-indent: 2px; }
+#gearV   { left: 0; top: 30px; width: 140px; height: 104px; text-align: center;
+           font-size: 104px; line-height: 104px; font-weight: bold; }
+#gearAcc { left: 0; top: 136px; width: 140px; height: 6px; background: #55585a; }
+
+/* ── rpm number, coolant ── */
+#rpmL  { left: 360px; top: 228px; }
+#rpmBox  { left: 360px; top: 254px; width: 200px; height: 56px; white-space: nowrap; }
+#rpmV    { font-size: 52px; line-height: 56px; }
+#coolL { left: 572px; top: 228px; }
+#coolBox { left: 624px; top: 222px; width: 160px; height: 46px; text-align: right; white-space: nowrap; }
+#coolV   { font-size: 40px; line-height: 46px; }
+#coolBox .unit { font-size: 20px; }
+#cool  { left: 572px; top: 278px; }
+#coolS { display: none; }
+
+/* ── bottom strip ── */
+.cell { top: 336px; height: 80px; }
+.cl   { left: 0; top: 10px; }
+.cv   { left: 0; top: 38px; height: 36px; font-size: 32px; line-height: 36px; white-space: nowrap; }
+#sesCell { left: 504px; width: 150px; }
+#stDot { left: 0; top: 16px; width: 12px; height: 12px; background: #55585a; }
+#stTxt { left: 22px; top: 10px; height: 24px; font-size: 18px; line-height: 24px; letter-spacing: 2px; white-space: nowrap; }
+#stSub { left: 22px; top: 40px; height: 24px; font-size: 18px; line-height: 24px; color: #b4b7ba; white-space: nowrap; }
+.zh #stTxt, .zh #stSub { font-size: 20px; }
+#lockC { left: -2px; top: 41px; display: none; }
+/* oil pressure and charging, standby only: a green square says "fine"
+   without a word being read; grey = engine not running, red = fault */
+.ttD { left: 0; width: 12px; height: 12px; background: #55585a; }
+.ttT { left: 22px; height: 24px; font-size: 18px; line-height: 24px; color: #b4b7ba; white-space: nowrap; }
+.zh .ttT { font-size: 20px; }
+
+/* ── calibration panel (used parked, so it may be denser) ── */
+#raw  { left: 8px; top: 4px; width: 340px; height: 328px; display: none; background: #070a0a; }
+#rawT { left: 10px; top: 6px; color: #ffffff; }
+.rr { left: 10px; width: 320px; height: 18px; font-size: 16px; line-height: 18px; }
+.rn { left: 0; color: #b4b7ba; white-space: nowrap; }
+.ra { left: 118px; width: 80px; text-align: right; color: #c8c8c8; white-space: nowrap; }
+.rb { left: 202px; width: 118px; text-align: right; color: #ffffff; white-space: nowrap; }
+
+/* ── view change: a short dip to dark instead of a hard cut ── */
+#fade { left: 0; top: 0; width: 800px; height: 336px; display: none; background: #050707; }
+
+/* ── warnings: red blocks that take over the bottom strip in every view,
+      plus a red bar along the top edge, the part of the screen closest to
+      the road. They never cover speed, gear or the rpm bar; what they do
+      cover (GPS speed, steering, timer) does not matter while one is up. ── */
+#alTop  { left: 0; top: 0; width: 800px; height: 10px; display: none; background: #ff2801; }
+#alerts { left: 76px; top: 338px; width: 572px; height: 78px; padding-left: 8px; display: none;
+          background: #050707; white-space: nowrap; }
+.al { display: none; vertical-align: top; margin: 9px 8px 0 0; height: 60px; padding: 0 20px;
+      background: #ff2801; color: #ffffff;
+      font-size: 30px; line-height: 60px; font-weight: bold; letter-spacing: 3px; }
+
+/* ── feedback for the commander: also in the strip, never over the gauges ── */
+#toast { left: 344px; top: 346px; width: 310px; height: 62px; display: none;
+         background: #0b3a45; color: #ffffff; font-weight: bold;
+         text-align: center; font-size: 22px; line-height: 62px; letter-spacing: 2px; white-space: nowrap; }
+#toast.ask { background: #f89c1e; color: #140d02; }
+
+/* ── STREET: speed is the whole screen; coolant and outside temperature
+      sit in the strip ── */
+.m-street #rpm     { left: 20px; }
+.m-street #spdL    { left: 96px; top: 84px; width: 420px; text-align: right; }
+.m-street #spdV    { left: 96px; top: 100px; width: 420px; height: 210px; font-size: 210px; line-height: 210px; }
+.m-street #spdU    { left: 526px; top: 260px; font-size: 24px; }
+.m-street #gearBox { left: 630px; top: 100px; width: 150px; height: 208px; }
+.m-street #gearL   { width: 150px; top: 12px; }
+.m-street #gearV   { width: 150px; top: 42px; height: 154px; font-size: 150px; line-height: 154px; }
+.m-street #gearAcc { width: 150px; top: 202px; }
+.m-street #coolL   { left: 84px; top: 346px; }
+.m-street #coolBox { left: 84px; top: 374px; width: 150px; height: 36px; text-align: left; }
+.m-street #coolV   { font-size: 32px; line-height: 36px; }
+.m-street #coolBox .unit { font-size: 18px; }
+.m-street #cool    { left: 236px; top: 362px; }
+.m-street #ambCell { left: 504px; top: 336px; width: 150px; height: 80px; }
+
+/* ── STANDBY: warming up, pit lane. Two modules of the same build:
+      coolant number over coolant bar, gear and rpm number over rpm bar.
+      The strip holds what one looks at after a session. ── */
+.m-standby #coolL   { left: 44px; top: 24px; }
+.m-standby #coolBox { left: 40px; top: 52px; width: 420px; height: 190px; text-align: left; }
+.m-standby #coolV   { font-size: 180px; line-height: 190px; }
+.m-standby #coolBox .unit { font-size: 32px; margin-left: 10px; }
+.m-standby #cool    { left: 44px; top: 258px; }
+.m-standby #coolS   { display: block; left: 220px; top: 22px; width: 220px; height: 28px; text-align: right;
+                      font-size: 24px; line-height: 28px; font-weight: bold; letter-spacing: 2px; white-space: nowrap; }
+.m-standby #gearBox { left: 480px; top: 24px; width: 132px; height: 212px; }
+.m-standby #gearL   { width: 132px; top: 10px; }
+.m-standby #gearV   { width: 132px; top: 44px; height: 150px; font-size: 140px; line-height: 150px; }
+.m-standby #gearAcc { width: 132px; top: 206px; }
+.m-standby #rpmL    { left: 636px; top: 24px; }
+.m-standby #rpmBox  { left: 634px; top: 50px; width: 150px; }
+.m-standby #rpmBox .unit { display: none; }     /* no room, and the label says it */
+.m-standby #rpm     { left: 480px; top: 258px; }
+.m-standby #ambCell { left: 636px; top: 146px; width: 148px; height: 90px; }
+.m-standby #ambCell .cv { height: 44px; font-size: 40px; line-height: 44px; }
+.m-standby #sesCell { left: 84px; }
+</style>
+</head>
+<body>
+<div id="app">
+    <div id="veil"></div>
+    <div id="strip"></div>
+
+    <!-- ── left: friction circle ── -->
+    <canvas id="gBg" class="vT" width="260" height="260"></canvas>
+    <canvas id="gFg" class="vT" width="260" height="260"></canvas>
+    <div id="gTot" class="vT"><span id="gTotV" class="num s"></span><span class="unit s">g</span></div>
+    <div id="gMaxL" class="lb vT" data-l="max"></div>
+    <div id="gMax" class="num vT"></div>
+
+    <!-- ── engine speed bar (every view) ── -->
+    <canvas id="rpm" width="424" height="44"></canvas>
+
+    <!-- ── speed, gear, pedals ── -->
+    <div id="spdL" class="lb vT vS" data-l="speed"></div>
+    <div id="spdV" class="num vT vS"></div>
+    <span id="spdU" class="unit vT vS">km/h</span>
+
+    <div id="gearBox">
+        <div id="gearL" class="lb" data-l="gear"></div>
+        <div id="gearV"></div>
+        <div id="gearAcc"></div>
+    </div>
+
+    <canvas id="ped" class="vT" width="58" height="250"></canvas>
+
+    <!-- ── rpm number, coolant ── -->
+    <div id="rpmL" class="lb vT vB" data-l="rpm"></div>
+    <div id="rpmBox" class="vT vB"><span id="rpmV" class="num s"></span><span class="unit s">r/min</span></div>
+
+    <div id="coolL" class="lb" data-l="cool"></div>
+    <div id="coolS"></div>
+    <div id="coolBox"><span id="coolV" class="num s"></span><span class="unit s">&deg;C</span></div>
+    <canvas id="cool" width="212" height="26"></canvas>
+
+    <!-- ── bottom strip ── -->
+    <canvas id="back" class="cell" width="64" height="80" style="left:0"></canvas>
+
+    <div class="cell vT" style="left:84px;width:200px">
+        <div class="lb cl" data-l="gps"></div>
+        <div class="cv"><span id="gpsV" class="num s"></span><span class="unit s">km/h</span></div>
+    </div>
+
+    <div class="cell vT" style="left:296px;width:196px">
+        <div class="lb cl" data-l="steer"></div>
+        <div class="cv"><span id="stV" class="num s"></span></div>
+        <canvas id="stC" width="96" height="24" style="left:96px;top:44px"></canvas>
+    </div>
+
+    <div class="cell vT vB" id="sesCell">
+        <div class="lb cl" data-l="ses"></div>
+        <div class="cv"><span id="sesV" class="num s"></span></div>
+    </div>
+
+    <div class="cell vB" style="left:296px;width:196px">
+        <div class="lb cl" data-l="peakg"></div>
+        <div class="cv"><span id="pkV" class="num s"></span><span class="unit s">g</span></div>
+    </div>
+
+    <div class="cell vB" style="left:504px;width:150px">
+        <div id="ttOilD" class="ttD" style="top:16px"></div><div id="ttOilT" class="ttT" style="top:10px"></div>
+        <div id="ttBatD" class="ttD" style="top:46px"></div><div id="ttBatT" class="ttT" style="top:40px"></div>
+    </div>
+
+    <div class="cell" id="stCell" style="left:664px;width:136px">
+        <div id="stDot"></div>
+        <div id="stTxt"></div>
+        <canvas id="lockC" width="16" height="20"></canvas>
+        <div id="stSub"></div>
+    </div>
+
+    <!-- ── outside temperature (street: strip, standby: beside the gear) ── -->
+    <div id="ambCell" class="vS vB">
+        <div class="lb cl" data-l="amb"></div>
+        <div class="cv"><span id="ambV" class="num s"></span><span class="unit s">&deg;C</span></div>
+    </div>
+
+    <div id="fade"></div>
+
+    <div id="alTop"></div>
+    <div id="alerts"><span id="alOil" class="al"></span><span id="alBat" class="al"></span><span id="alTmp" class="al"></span></div>
+
+    <!-- ── calibration panel (hidden) ── -->
+    <div id="raw">
+        <div class="lb" id="rawT" data-l="raw"></div>
+        <div id="rawRows" style="left:0;top:34px;width:340px;height:290px"></div>
+    </div>
+
+    <div id="toast"></div>
+</div>
+
+<script type="text/javascript">
+(function () {
+    var W = window, D = document;
+
+    // ─────────────────────────────────────────────────────────────
+    // Configuration
+    // ─────────────────────────────────────────────────────────────
+    var CFG = {
+        dataUrl:    "file:///tmp/nd2cn/dashboard.json",
+        pollMs:     50,      // data poll period (the daemon writes at 20 Hz)
+        softMs:     600,     // no new sample for this long -> values turn grey
+        staleMs:    2000,    // ... and for this long -> OFFLINE, values blank
+
+        rpmMax:     8000,    // right end of the bar
+        rpmAmber:   6000,    // blocks from here up are amber
+        rpmRed:     7000,    // blocks from here up are red
+        rpmWarn:    6500,    // the whole bar turns amber
+        rpmRedline: 7500,    // ND2 2.0 redline: the whole bar flashes red
+        rpmFlashMs: 170,     // half period of that flash. Keeps it under three
+                             // flashes a second, the limit for large flashing
+                             // areas (and for red in particular)
+
+        gRing:      1.25,    // g at the outer ring
+        gClamp:     1.30,    // the dot never leaves the plate
+        gBall:      true,    // true: the dot moves like a ball on the dashboard
+                             //       (braking = up, right-hand corner = left)
+                             // false: engineering g-g plot
+                             //       (acceleration = up, right-hand corner = right)
+        gSane:      2.5,     // samples above this are glitches, not peaks
+        trailMs:    4000,    // length of the fading trail
+
+        coolMin:    40,      // coolant bar range, deg C
+        coolMax:    130,
+        coolCold:   60,      // below: COLD
+        coolReady:  80,      // below: WARMING, still blue; from here green, NORMAL
+        coolWarn:   105,     // amber, HOT
+        coolCrit:   112,     // red, OVERHEAT, and a warning block
+
+        steerFull:  180,     // steering indicator full scale, degrees
+
+        // Automatic view selection. A view change moves everything on the
+        // screen, so it must not happen in ordinary traffic: a firm stop at
+        // a light reaches 0.4 g and a motorway slip road 5000 r/min, hence
+        // the thresholds sit above both and must hold for a moment.
+        moveKmh:      5,     // above: STREET (back to STANDBY below stopKmh)
+        stopKmh:      3,
+        trackG:       0.55,  // combined g that enters TRACK
+        trackRpm:     5500,  // ... or this engine speed
+        trackStayG:   0.3,   // lower thresholds that keep TRACK once entered
+        trackStayRpm: 4000,
+        streetMs:     500,   // moving this long          -> STREET
+        standbyMs:    3000,  // standing this long        -> STANDBY (not at every stop line)
+        trackEnterMs: 800,   // above the thresholds      -> TRACK
+        trackExitMs:  12000, // below the stay thresholds -> leave TRACK; long,
+                             // so the layout does not flip in a slow corner
+
+        // warnings
+        engineRpm:    400,   // below: engine not running. The oil and charge
+                             // lamps are lit then on every car; not a fault.
+        warnHoldMs:   1000,  // a warning must last this long before it shows
+        warnBlinkMs:  5000,  // it blinks at 1 Hz this long, then stays steady
+
+        resetArmMs:   3000,  // the second press that resets must come this soon
+        fadeMs:       160    // dip to dark when the view changes
+    };
+
+    var C_CYAN = "#3cc8e8", C_AMBER = "#f89c1e", C_RED = "#ff2801", C_GREEN = "#3ecf6e", C_BLUE = "#3d8bff";
+    var C_OFF = "#55585a", C_LABEL = "#b4b7ba";
+    var C_RED_LOW = "#8f1600";                 // the dark half of every red blink
+    var TAU = Math.PI * 2;
+    var DASH = "-";
+
+    var OPT = { demo: false, raw: false, lang: "", view: "", alert: false };
+    (function () {
+        var h = String(W.location.hash || "").replace(/^#/, "").split("&"), i, kv;
+        for (i = 0; i < h.length; i++) {
+            kv = h[i].split("=");
+            if (kv[0] === "demo") { OPT.demo = true; }
+            else if (kv[0] === "raw") { OPT.raw = true; }
+            else if (kv[0] === "lang" && kv[1]) { OPT.lang = kv[1]; }
+            else if (kv[0] === "view" && kv[1]) { OPT.view = kv[1]; }
+            else if (kv[0] === "alert") { OPT.alert = true; }
+            else if (kv[0] === "data" && kv[1]) { CFG.dataUrl = decodeURIComponent(kv.slice(1).join("=")); }
+        }
+    })();
+
+    // ─────────────────────────────────────────────────────────────
+    // Language: Chinese labels when the system language is zh_CN, English
+    // otherwise (and when the page is opened on its own). The page runs in
+    // an iframe, so the GUI framework lives in the parent window; the loader
+    // also passes the language in the URL in case the parent is off limits.
+    // ─────────────────────────────────────────────────────────────
+    var lang = "en";
+    (function () {
+        var fw = null;
+        if (OPT.lang) { lang = OPT.lang === "zh_CN" ? "zh_CN" : "en"; return; }
+        try { fw = W.framework || W.parent.framework; } catch (e) {}
+        try { if (fw && fw.localize && fw.localize.getCurrLang() === "zh_CN") { lang = "zh_CN"; } } catch (e2) {}
+    })();
+    var ZH = lang === "zh_CN";
+    var LABELS = ZH ? {
+        speed: "车速", gear: "挡位", rpm: "转速", cool: "水温", max: "峰值", peakg: "峰值 G",
+        gps: "GPS 车速", steer: "转向角", ses: "计时", amb: "车外温度", raw: "校准"
+    } : {
+        speed: "SPEED", gear: "GEAR", rpm: "RPM", cool: "COOLANT", max: "PEAK", peakg: "PEAK G",
+        gps: "GPS SPEED", steer: "STEERING", ses: "SESSION", amb: "OUTSIDE", raw: "CALIBRATION"
+    };
+    // The status cell is 114 px wide: at most 7 capitals or 5 hanzi per line.
+    var TXT = ZH ? {
+        live: "实时", demo: "演示", waking: "唤醒中", stale: "无数据",
+        conn: "连接中", off: "离线", reset: "已重置", auto: "自动",
+        again: "再按一次重置", parked: "请先停车",
+        modes: { standby: "待机", street: "公路", track: "赛道" },
+        oil: "油压低", batt: "充电故障", temp: "水温",
+        ttOil: "机油压力", ttBat: "充电系统",
+        cool: ["冷车", "暖机中", "正常", "偏高", "过热"],
+        rows: ["转速", "油门", "转向", "横向 G", "纵向 G", "水温", "车速 VSS", "车速 BCM",
+               "挡位 MT", "挡杆 AT", "制动", "GPS 车速", "GPS 航向", "油压 / 充电", "序号 / 频率", "信号 / 延迟"]
+    } : {
+        live: "LIVE", demo: "DEMO", waking: "WAKING", stale: "NO DATA",
+        conn: "WAIT", off: "OFFLINE", reset: "RESET DONE", auto: "AUTO",
+        again: "AGAIN TO RESET", parked: "PARKED ONLY",
+        modes: { standby: "STANDBY", street: "STREET", track: "TRACK" },
+        oil: "OIL", batt: "BATT", temp: "TEMP",
+        ttOil: "OIL PRESS", ttBat: "CHARGING",
+        cool: ["COLD", "WARMING", "NORMAL", "HOT", "OVERHEAT"],
+        rows: ["RPM", "THROTTLE", "STEERING", "LAT G", "LON G", "COOLANT", "SPEED VSS", "SPEED BCM",
+               "GEAR MT", "LEVER AT", "BRAKE", "GPS SPEED", "GPS HEADING", "OIL / CHARGE", "SEQ / RATE", "SIGNALS / AGE"]
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    // Small helpers
+    // ─────────────────────────────────────────────────────────────
+    function $(id) { return D.getElementById(id); }
+    function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+    function isNum(v) { return typeof v === "number" && isFinite(v); }
+    function num(v) {
+        if (typeof v === "string" && v !== "") { v = Number(v); }
+        return isNum(v) ? v : null;
+    }
+    function pad2(n) { return n < 10 ? "0" + n : String(n); }
+    function fixed(v, n, sign) {
+        var s = Math.abs(v).toFixed(n);
+        if (Number(s) === 0) { return s; }
+        return (v < 0 ? "-" : (sign ? "+" : "")) + s;
+    }
+    function setClass(el, cls) {
+        if (el._c !== cls) { el._c = cls; el.className = el._b ? el._b + " " + cls : cls; }
+    }
+    function setText(el, s) {
+        if (el._t !== s) { el._t = s; el.textContent = s; }
+    }
+    function setBg(el, color) {
+        if (el._bg !== color) { el._bg = color; el.style.background = color; }
+    }
+    // Tabular figures: each character gets its own fixed-width cell so that
+    // numbers never jitter sideways while they change.
+    function setDigits(el, s) {
+        var kids, i, ch, sp, cls;
+        if (el._s === s) { return; }
+        el._s = s;
+        kids = el._k || (el._k = []);
+        for (i = 0; i < s.length; i++) {
+            ch = s.charAt(i);
+            sp = kids[i];
+            if (!sp) {
+                sp = D.createElement("span");
+                sp._ch = ""; sp._cl = ""; sp._on = true;
+                el.appendChild(sp);
+                kids[i] = sp;
+            }
+            cls = (ch === "." || ch === ":" || ch === " " || ch === "°") ? "p" : "d";
+            if (sp._cl !== cls) { sp._cl = cls; sp.className = cls; }
+            if (sp._ch !== ch) { sp._ch = ch; sp.textContent = ch; }
+            if (!sp._on) { sp._on = true; sp.style.display = ""; }
+        }
+        for (i = s.length; i < kids.length; i++) {
+            if (kids[i]._on) { kids[i]._on = false; kids[i].style.display = "none"; }
+        }
+    }
+    function applyLabels() {
+        var els = D.getElementsByTagName("div"), i, k;
+        D.body.className = ZH ? "zh" : "en";
+        for (i = 0; i < els.length; i++) {
+            k = els[i].getAttribute("data-l");
+            if (k && LABELS[k]) { els[i].textContent = LABELS[k]; }
+        }
+    }
+    function post(msg) {
+        try {
+            if (W.parent && W.parent !== W) { W.parent.postMessage("nd2cn-dash:" + msg, "*"); }
+        } catch (e) {}
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Sample store + linear interpolation between the last two samples
+    // ─────────────────────────────────────────────────────────────
+    var FIELDS = ["speed", "rpm", "throttle", "brake", "steering", "lat_g", "lon_g", "coolant", "ambient", "gps_speed"];
+    var S = {
+        prev: null,       // interpolation start (what was on screen when cur arrived)
+        cur: null,        // newest sample
+        tCur: 0,          // arrival time of cur
+        dt: CFG.pollMs,   // smoothed interval between samples
+        lastText: "",
+        lastChange: 0,    // last time the file content changed
+        okSince: 0,
+        obj: null         // newest parsed object (calibration panel)
+    };
+    var T0 = Date.now();
+    var V = {};           // values for the current frame
+    var live = false;     // there is a sample to show
+    var stale = false;    // ... but it is older than CFG.softMs
+
+    function blank() {
+        var o = {}, i;
+        for (i = 0; i < FIELDS.length; i++) { o[FIELDS[i]] = null; }
+        return o;
+    }
+    function interpolate(now, out) {
+        var c = S.cur, p = S.prev, f, i, k, a, b;
+        f = S.dt > 0 ? clamp((now - S.tCur) / S.dt, 0, 1) : 1;
+        for (i = 0; i < FIELDS.length; i++) {
+            k = FIELDS[i];
+            b = c ? c[k] : null;
+            a = p ? p[k] : null;
+            out[k] = (b === null) ? null : (a === null ? b : a + (b - a) * f);
+        }
+        return out;
+    }
+    function onSample(o, now) {
+        var c = blank(), i, gap, br;
+        for (i = 0; i < FIELDS.length; i++) { c[FIELDS[i]] = num(o[FIELDS[i]]); }
+        // brake is a 0/1 switch on this car; anything above 1 is taken as percent
+        br = c.brake;
+        if (br !== null) { c.brake = br <= 1 ? br * 100 : clamp(br, 0, 100); }
+        if (c.throttle !== null) { c.throttle = clamp(c.throttle, 0, 100); }
+        c.idle = o.idle === true;
+        c.gear = o.gear;
+        c.lever = o.lever;
+        c.gearbox = o.gearbox;
+        c.oil = o.oil_warn === 1 || o.oil_warn === true;
+        c.batt = o.batt_warn === 1 || o.batt_warn === true;
+        c.oilOk = o.oil_warn === 0 || o.oil_warn === false;       // known to be fine, not just unknown
+        c.battOk = o.batt_warn === 0 || o.batt_warn === false;
+
+        gap = now - S.tCur;
+        if (S.cur && gap > 15 && gap < 1000) { S.dt += (gap - S.dt) * 0.25; }
+        // Start the next segment from what is on screen right now, so motion
+        // stays continuous even when samples arrive early or late.
+        S.prev = (S.cur && !S.cur.idle && gap < 1000) ? interpolate(now, blank()) : null;
+        S.cur = c;
+        S.tCur = now;
+        S.lastChange = now;
+        S.obj = o;
+        if (!c.idle) { trackPeaks(c); }
+    }
+    function onText(text, now) {
+        var o;
+        if (text === S.lastText) { return; }
+        S.lastText = text;
+        try { o = JSON.parse(text); } catch (e) { return; }   // half-written file: skip
+        if (o && typeof o === "object") { onSample(o, now); }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Data source: XMLHttpRequest polling of the local JSON file
+    // ─────────────────────────────────────────────────────────────
+    var X = { fails: 0, bust: true, n: 0 };
+    function poll() {
+        var xhr = null, done = false, started = Date.now(), guard;
+        function finish(ok, text) {
+            var now, wait;
+            if (done) { return; }
+            done = true;
+            clearTimeout(guard);
+            now = Date.now();
+            if (ok) {
+                X.fails = 0;
+                onText(text, now);
+                // Answers keep coming but never change: maybe a cached copy.
+                // Flip the cache-buster style and see whether that helps.
+                if (now - S.lastChange > 3000 && now - S.okSince > 3000) { X.bust = !X.bust; S.okSince = now; }
+            } else {
+                X.fails++;
+                // Some builds reject "file.json?123"; alternate between both forms.
+                if (X.fails % 10 === 0) { X.bust = !X.bust; }
+            }
+            wait = (X.fails > 5 ? 250 : CFG.pollMs) - (Date.now() - started);
+            setTimeout(poll, wait > 4 ? wait : 4);
+        }
+        guard = setTimeout(function () {
+            try { if (xhr) { xhr.abort(); } } catch (e) {}
+            finish(false, "");
+        }, 600);
+        try {
+            xhr = new XMLHttpRequest();
+            xhr.open("GET", CFG.dataUrl + (X.bust ? "?" + (X.n++) : ""), true);
+            if (xhr.overrideMimeType) { xhr.overrideMimeType("text/plain; charset=utf-8"); }
+            xhr.onreadystatechange = function () {
+                var t = "";
+                if (xhr.readyState !== 4) { return; }
+                try { t = xhr.responseText || ""; } catch (e) {}
+                // file:// answers with status 0
+                finish((xhr.status === 200 || xhr.status === 0) && t.length > 1, t);
+            };
+            xhr.send(null);
+        } catch (e) {
+            finish(false, "");
+        }
+    }
+
+    // Synthetic lap for bench testing (#demo)
+    function demoTick() {
+        var t = (Date.now() - T0) / 1000, o = {}, lat, lon, spd, g, rpm, ratios;
+        lat = 1.08 * Math.sin(t * 0.9) * (0.55 + 0.45 * Math.sin(t * 0.23 + 1));
+        lon = 0.55 * Math.cos(t * 1.8 + 0.6) - 0.25 * Math.max(0, Math.sin(t * 0.45));
+        spd = 104 + 52 * Math.sin(t * 0.33) + 6 * Math.sin(t * 1.7);
+        ratios = [0, 7.97, 13.56, 19.9, 25.4, 31.5, 40.55];     // km/h per 1000 r/min
+        g = spd < 48 ? 2 : (spd < 78 ? 3 : (spd < 112 ? 4 : (spd < 148 ? 5 : 6)));
+        rpm = spd / ratios[g] * 1000;
+        o.seq = Math.round(t * 20);
+        o.ts = Math.round(Date.now() / 1000);
+        o.speed = Math.round(spd);
+        o.rpm = Math.round(rpm);
+        o.gear = g; o.lever = 1; o.gearbox = "mt";
+        o.throttle = lon > 0 ? Math.round(clamp(lon * 190, 0, 100) * 10) / 10 : 0;
+        o.brake = lon < -0.18 ? 1 : 0;
+        o.steering = Math.round(lat * 420) / 10;
+        o.lat_g = Math.round(lat * 1000) / 1000;
+        o.lon_g = Math.round(lon * 1000) / 1000;
+        o.coolant = Math.round(93 + 5 * Math.sin(t * 0.07));
+        o.gps_speed = Math.round((spd - 0.6) * 10) / 10;
+        o.gps_fix = 1; o.gps_lat = 31.2304; o.gps_lon = 121.474; o.gps_heading = Math.round((t * 12) % 360 * 10) / 10;
+        o.ambient = 24.5;
+        o.oil_warn = OPT.alert ? 1 : 0; o.batt_warn = OPT.alert ? 1 : 0;
+        o.hz = 20; o.sig = Math.round(t * 320);
+        // raw numbers as the car sends them: unsigned, 0 g = 4000, wheel centre = 16000
+        o.raw = { rpm: Math.round(rpm / 2), thr: Math.round(o.throttle * 10), steer: Math.round(o.steering * 10) + 16000,
+                  latg: Math.round(lat * 1000) + 4000, lon: Math.round(lon * 1000) + 4000,
+                  cool: o.coolant + 40, vss: Math.round(spd * 100), spd: o.speed, gear: g, lever: 1 };
+        onSample(o, Date.now());
+        setTimeout(demoTick, 50);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Session state: peak g and timer. Memory only: the loader keeps it while
+    // the dashboard is closed, and everything is gone at power-off.
+    // ─────────────────────────────────────────────────────────────
+    var PK = { l: 0, r: 0, t: 0, b: 0, tot: 0, ver: 0 };
+    var session = { start: Date.now(), sent: "", saveFrom: Date.now() + 1000 };
+    var GS = CFG.gBall ? { x: -1, y: 1 } : { x: 1, y: -1 };   // g -> screen direction
+
+    function trackPeaks(c) {
+        var gx, gy, m, ch = false;
+        if (c.lat_g === null || c.lon_g === null) { return; }
+        gx = GS.x * c.lat_g; gy = GS.y * c.lon_g;
+        m = Math.sqrt(gx * gx + gy * gy);
+        if (m > CFG.gSane) { return; }
+        if (-gx > PK.l) { PK.l = -gx; ch = true; }
+        if (gx > PK.r) { PK.r = gx; ch = true; }
+        if (-gy > PK.t) { PK.t = -gy; ch = true; }
+        if (gy > PK.b) { PK.b = gy; ch = true; }
+        if (m > PK.tot) { PK.tot = m; ch = true; }
+        if (ch) { PK.ver++; }
+    }
+    function resetSession() {
+        PK.l = PK.r = PK.t = PK.b = PK.tot = 0; PK.ver++;
+        session.start = Date.now();
+        trail.n = 0;
+        toast(TXT.reset, false, 1400);
+    }
+    function saveState() {
+        var s;
+        // Not in the first second: the loader answers "ready" with the state
+        // it kept from last time, and a fresh page must not overwrite that.
+        if (Date.now() < session.saveFrom) { return; }
+        s = JSON.stringify({ s: session.start, p: [PK.l, PK.r, PK.t, PK.b, PK.tot], m: M.lock ? M.mode : "" });
+        if (s !== session.sent) { session.sent = s; post("state:" + s); }
+    }
+    function loadState(text) {
+        var o, p;
+        try { o = JSON.parse(text); } catch (e) { return; }
+        if (!o || !isNum(o.s) || o.s > Date.now()) { return; }
+        session.start = o.s;
+        p = o.p;
+        if (p && p.length === 5 && isNum(p[0]) && isNum(p[1]) && isNum(p[2]) && isNum(p[3]) && isNum(p[4])) {
+            PK.l = p[0]; PK.r = p[1]; PK.t = p[2]; PK.b = p[3]; PK.tot = p[4]; PK.ver++;
+        }
+        if (o.m === "standby" || o.m === "street" || o.m === "track") { M.lock = true; setMode(o.m); }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Friction circle: rings at 0.5 g and 1.0 g, outer ring at 1.25 g,
+    // amber peak-hold marks on the four axes, glowing trail behind the dot.
+    // No text on the canvas: small anti-aliased type is unreadable here.
+    // ─────────────────────────────────────────────────────────────
+    var G_SIZE = 260, G_C = 130, G_PX = 96;   // canvas size, centre, pixels per g
+    var gBg = $("gBg").getContext("2d");
+    var gFg = $("gFg").getContext("2d");
+    var gBgVer = -1;
+    var TRAIL_N = 160;
+    var trail = { x: [], y: [], t: [], head: 0, n: 0, lastT: 0, lx: -99, ly: -99 };
+    var gState = { clean: false, dx: -99, dy: -99 };
+    var quality = 2;                          // 2: glow, 1: plain trail, 0: plain trail at 30 fps
+
+    function ring(c, g) {
+        c.beginPath();
+        c.arc(G_C, G_C, g * G_PX, 0, TAU, false);
+        c.stroke();
+    }
+    function peakMark(c, dx, dy, v) {
+        var r, px, py;
+        if (v < 0.08) { return; }
+        r = Math.min(v, CFG.gRing) * G_PX;
+        px = G_C + dx * r; py = G_C + dy * r;
+        c.beginPath();
+        c.moveTo(px - dy * 10, py - dx * 10);
+        c.lineTo(px + dy * 10, py + dx * 10);
+        c.stroke();
+    }
+    function drawGBg() {
+        var c = gBg, R = CFG.gRing * G_PX, d;
+        if (gBgVer === PK.ver) { return; }
+        gBgVer = PK.ver;
+        c.clearRect(0, 0, G_SIZE, G_SIZE);
+
+        c.beginPath();
+        c.arc(G_C, G_C, R, 0, TAU, false);
+        c.fillStyle = "rgba(255,255,255,0.06)";
+        c.fill();
+        c.lineWidth = 3;                           // must survive sunlight on the panel
+        c.strokeStyle = "rgba(255,255,255,0.64)";
+        c.stroke();
+
+        c.lineWidth = 2;
+        c.strokeStyle = "rgba(255,255,255,0.22)";
+        c.beginPath();
+        c.moveTo(G_C - R, G_C); c.lineTo(G_C + R, G_C);
+        c.moveTo(G_C, G_C - R); c.lineTo(G_C, G_C + R);
+        c.stroke();
+
+        c.strokeStyle = "rgba(255,255,255,0.30)";
+        ring(c, 0.5);
+        c.strokeStyle = "rgba(255,255,255,0.44)";  // the 1 g ring is the one that is read
+        ring(c, 1.0);
+
+        // The only text on the plate: which ring is 1 g. It sits in a gap cut
+        // into that ring, lower right, where the trail is rarely drawn.
+        d = Math.round(0.7071 * G_PX);
+        c.clearRect(G_C + d - 17, G_C + d - 12, 34, 24);
+        c.fillStyle = "rgba(255,255,255,0.06)";
+        c.fillRect(G_C + d - 17, G_C + d - 12, 34, 24);
+        c.font = "bold 18px Tipperary, Arial, Helvetica, sans-serif";
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillStyle = C_LABEL;
+        c.fillText("1g", G_C + d, G_C + d);
+
+        c.strokeStyle = C_AMBER;
+        c.lineWidth = 5;
+        c.lineCap = "butt";
+        peakMark(c, 0, -1, PK.t);
+        peakMark(c, 0, 1, PK.b);
+        peakMark(c, -1, 0, PK.l);
+        peakMark(c, 1, 0, PK.r);
+    }
+    function trailPush(x, y, now) {
+        var i, dx = x - trail.lx, dy = y - trail.ly;
+        if (now - trail.lastT < 33 || dx * dx + dy * dy < 0.36) { return; }
+        i = trail.head;
+        trail.x[i] = x; trail.y[i] = y; trail.t[i] = now;
+        trail.head = (i + 1) % TRAIL_N;
+        if (trail.n < TRAIL_N) { trail.n++; }
+        trail.lastT = now; trail.lx = x; trail.ly = y;
+    }
+    // The trail is stroked in a few alpha steps (old = faint, new = bright)
+    // instead of one stroke per segment, which Presto could not afford.
+    function trailStroke(c, now, width, gain, buckets, endX, endY) {
+        var k, i = 0, b = -1, nb, age, px = 0, py = 0, a, started = false;
+        c.lineWidth = width;
+        for (k = 0; k <= trail.n; k++) {
+            if (k < trail.n) {
+                i = (trail.head - trail.n + k + TRAIL_N * 2) % TRAIL_N;
+                age = (now - trail.t[i]) / CFG.trailMs;
+            } else {
+                if (endX === null) { break; }
+                age = 0;                         // last segment runs to the live dot
+            }
+            nb = Math.floor((1 - clamp(age, 0, 0.999)) * buckets);
+            if (k > 0) {
+                if (nb !== b) {
+                    if (started) { c.stroke(); }
+                    b = nb;
+                    a = (b + 1) / buckets;
+                    c.strokeStyle = "rgba(60,200,232," + (a * a * gain).toFixed(3) + ")";
+                    c.beginPath();
+                    c.moveTo(px, py);
+                    started = true;
+                }
+                if (k < trail.n) { c.lineTo(trail.x[i], trail.y[i]); } else { c.lineTo(endX, endY); }
+            }
+            if (k < trail.n) { px = trail.x[i]; py = trail.y[i]; }
+        }
+        if (started) { c.stroke(); }
+    }
+    function drawG(now) {
+        var c = gFg, has = live && V.lat_g !== null && V.lon_g !== null;
+        var gx, gy, m = 0, lim, x = 0, y = 0, col;
+
+        // drop trail points that have faded out
+        while (trail.n > 0 && now - trail.t[(trail.head - trail.n + TRAIL_N * 2) % TRAIL_N] > CFG.trailMs) { trail.n--; }
+
+        if (has) {
+            gx = GS.x * V.lat_g; gy = GS.y * V.lon_g;
+            m = Math.sqrt(gx * gx + gy * gy);
+            lim = CFG.gClamp;
+            if (m > lim) { gx *= lim / m; gy *= lim / m; }
+            x = G_C + gx * G_PX; y = G_C + gy * G_PX;
+            trailPush(x, y, now);
+        }
+        if (!has && trail.n === 0) {
+            if (!gState.clean) { c.clearRect(0, 0, G_SIZE, G_SIZE); gState.clean = true; }
+            return;
+        }
+        if (has && trail.n <= 1 && !gState.clean && Math.abs(x - gState.dx) < 0.3 && Math.abs(y - gState.dy) < 0.3) {
+            return;                                // parked: nothing moved
+        }
+        gState.clean = false;
+        gState.dx = has ? x : -99; gState.dy = has ? y : -99;
+
+        c.clearRect(0, 0, G_SIZE, G_SIZE);
+        c.lineCap = "round";
+        c.lineJoin = "round";
+        if (trail.n > 0) {
+            if (quality >= 2) { trailStroke(c, now, 13, 0.18, 6, has ? x : null, y); }
+            trailStroke(c, now, 5, 0.92, quality >= 1 ? 10 : 5, has ? x : null, y);
+        }
+        if (has) {
+            col = m >= 1.0 ? "248,156,30" : "60,200,232";
+            c.fillStyle = "rgba(" + col + ",0.18)";
+            c.beginPath(); c.arc(x, y, 17, 0, TAU, false); c.fill();
+            c.fillStyle = "rgba(" + col + ",0.50)";
+            c.beginPath(); c.arc(x, y, 11, 0, TAU, false); c.fill();
+            c.fillStyle = "#ffffff";
+            c.beginPath(); c.arc(x, y, 6, 0, TAU, false); c.fill();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // RPM bar: 20 solid blocks of 400 r/min. White, amber from 6000, red
+    // from 7000; the whole bar goes amber at 6500 and flashes red at redline.
+    // The flash is bright red / dark red, never white, and slower than 3 Hz:
+    // it has to be seen from the corner of the eye, not to dazzle at night.
+    // ─────────────────────────────────────────────────────────────
+    var rpmCtx = $("rpm").getContext("2d");
+    var RPM_W = 460, RPM_H = 44, RPM_SEG = 20, rpmKey = "";   // size follows the view, see setMode()
+    var shown = { rpm: 0, thr: 0, brk: 0 };
+
+    function drawRpm(now) {
+        var c = rpmCtx, rpm = shown.rpm, per = CFG.rpmMax / RPM_SEG, pitch = RPM_W / RPM_SEG;
+        var zone = rpm >= CFG.rpmRedline ? 2 : (rpm >= CFG.rpmWarn ? 1 : 0);
+        var flash = zone === 2 ? (Math.floor(now / CFG.rpmFlashMs) % 2) : 0;
+        var key = Math.round(rpm / CFG.rpmMax * RPM_W * 2) + "/" + zone + "/" + flash;
+        var i, x, lo, f, lit;
+        if (key === rpmKey) { return; }
+        rpmKey = key;
+        c.clearRect(0, 0, RPM_W, RPM_H);
+        for (i = 0; i < RPM_SEG; i++) {
+            x = Math.round(i * pitch);
+            lo = i * per;
+            c.fillStyle = lo >= CFG.rpmRed ? "rgba(255,40,1,0.34)" :
+                          (lo >= CFG.rpmAmber ? "rgba(248,156,30,0.24)" : "rgba(255,255,255,0.10)");
+            c.fillRect(x, 0, pitch - 3, RPM_H);
+            f = clamp((rpm - lo) / per, 0, 1);
+            if (f <= 0) { continue; }
+            if (zone === 2) { lit = flash ? C_RED_LOW : C_RED; }
+            else if (zone === 1) { lit = lo >= CFG.rpmRed ? C_RED : C_AMBER; }
+            else { lit = lo >= CFG.rpmRed ? C_RED : (lo >= CFG.rpmAmber ? C_AMBER : "#f4f4f4"); }
+            c.globalAlpha = f;                     // the leading block fades in
+            c.fillStyle = lit;
+            c.fillRect(x, 0, pitch - 3, RPM_H);
+            c.globalAlpha = 1;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Pedals (brake left in red, throttle right in green, as on every data
+    // trace and in the footwell), coolant block, steering
+    // ─────────────────────────────────────────────────────────────
+    var pedCtx = $("ped").getContext("2d"), pedKey = "";
+    var PED_H = 250, PED_W = 26;
+    function pedBar(c, x, v, color) {
+        var h = Math.round(v / 100 * PED_H);
+        c.fillStyle = "rgba(255,255,255,0.10)";
+        c.fillRect(x, 0, PED_W, PED_H);
+        if (h > 0) {
+            c.fillStyle = color;
+            c.fillRect(x, PED_H - h, PED_W, h);
+        }
+    }
+    function drawPedals() {
+        var key = Math.round(shown.thr / 100 * PED_H) + "/" + Math.round(shown.brk / 100 * PED_H);
+        if (key === pedKey) { return; }
+        pedKey = key;
+        pedCtx.clearRect(0, 0, 58, PED_H);
+        pedBar(pedCtx, 0, shown.brk, C_RED);
+        pedBar(pedCtx, 32, shown.thr, C_GREEN);
+    }
+
+    // One solid colour for the whole lit block: blue = not warm yet, green =
+    // normal, amber = hot, blinking red = too hot. The colour is the message;
+    // in STANDBY the same state is also spelled out next to the label.
+    var coolCtx = $("cool").getContext("2d"), coolKey = "";
+    var COOL_W = 212, COOL_H = 26;                             // size follows the view, see setMode()
+    function coolX(t) { return (clamp(t, CFG.coolMin, CFG.coolMax) - CFG.coolMin) / (CFG.coolMax - CFG.coolMin) * COOL_W; }
+    function coolLevel(t) {                                    // index into TXT.cool
+        return t >= CFG.coolCrit ? 4 : (t >= CFG.coolWarn ? 3 : (t >= CFG.coolReady ? 2 : (t >= CFG.coolCold ? 1 : 0)));
+    }
+    var COOL_COLORS = [C_BLUE, C_BLUE, C_GREEN, C_AMBER, C_RED];
+    var COOL_CLASSES = ["cCold", "cCold", "cWhite", "cAmber", "cRed"];
+    function coolColor(t) { return COOL_COLORS[coolLevel(t)]; }
+    function drawCool(now) {
+        var c = coolCtx, t = live ? V.coolant : null, crit = t !== null && t >= CFG.coolCrit;
+        // blinks together with its warning block, and stops when that does
+        var pulse = (crit && AL.tmp.on && now - AL.tmp.on < CFG.warnBlinkMs) ? Math.floor(now / 500) % 2 : 0;
+        var key = (t === null ? "x" : Math.round(coolX(t)) + "/" + coolColor(t)) + "/" + pulse, xw, xc;
+        if (key === coolKey) { return; }
+        coolKey = key;
+        xw = Math.round(coolX(CFG.coolWarn)); xc = Math.round(coolX(CFG.coolCrit));
+        c.clearRect(0, 0, COOL_W, COOL_H);
+        c.fillStyle = "rgba(255,255,255,0.10)";
+        c.fillRect(0, 0, xw, COOL_H);
+        c.fillStyle = "rgba(248,156,30,0.24)";
+        c.fillRect(xw, 0, xc - xw, COOL_H);
+        c.fillStyle = "rgba(255,40,1,0.34)";
+        c.fillRect(xc, 0, COOL_W - xc, COOL_H);
+        if (t === null) { return; }
+        c.fillStyle = (crit && pulse) ? C_RED_LOW : coolColor(t);
+        c.fillRect(0, 0, Math.max(6, Math.round(coolX(t))), COOL_H);
+    }
+
+    var stCtx = $("stC").getContext("2d"), stKey = "";
+    function drawSteer() {
+        var c = stCtx, a = live ? V.steering : null, w, key;
+        w = a === null ? 0 : Math.round(clamp(a / CFG.steerFull, -1, 1) * 46);
+        key = (a === null ? "x" : String(w));
+        if (key === stKey) { return; }
+        stKey = key;
+        c.clearRect(0, 0, 96, 24);
+        c.fillStyle = "rgba(255,255,255,0.12)";
+        c.fillRect(2, 6, 92, 12);
+        if (w !== 0) {
+            c.fillStyle = C_CYAN;
+            if (w > 0) { c.fillRect(48, 6, w, 12); } else { c.fillRect(48 + w, 6, -w, 12); }
+        }
+        c.fillStyle = a === null ? C_OFF : "#ffffff";
+        c.fillRect(46, 0, 4, 24);
+    }
+
+    function drawBack() {
+        var c = $("back").getContext("2d");
+        c.strokeStyle = "#c8c8c8";
+        c.lineWidth = 4;
+        c.lineCap = "square";
+        c.lineJoin = "miter";
+        c.beginPath();
+        c.moveTo(40, 25); c.lineTo(25, 40); c.lineTo(40, 55);
+        c.stroke();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Views: STANDBY / STREET / TRACK. Chosen from the newest sample with
+    // hysteresis; the commander can lock one.
+    // ─────────────────────────────────────────────────────────────
+    var MODES = ["standby", "street", "track"];
+    var SIZES = {                              // canvas sizes per view: [rpm w, rpm h, coolant w, coolant h]
+        standby: [304, 44, 396, 44],
+        street:  [760, 56, 220, 28],
+        track:   [424, 44, 212, 26]
+    };
+    var M = { mode: "", lock: false, since: 0, want: "" };
+    var FX = { until: 0, el: $("fade") };      // dip to dark on a view change
+    var app = $("app");
+
+    function appClass() {
+        app.className = "m-" + M.mode + (stale ? " stale" : "");
+    }
+    function setMode(m) {
+        var z = SIZES[m], rc = $("rpm"), cc = $("cool"), first = M.mode === "";
+        if (m === M.mode || !z) { return; }
+        M.mode = m;
+        M.since = 0;
+        appClass();
+        RPM_W = z[0]; RPM_H = z[1]; COOL_W = z[2]; COOL_H = z[3];
+        rc.width = RPM_W; rc.height = RPM_H;       // resizing also clears
+        cc.width = COOL_W; cc.height = COOL_H;
+        rpmKey = ""; coolKey = ""; pedKey = ""; stKey = "";
+        gState.clean = false;
+        if (!first) {                              // the new layout comes up out of the dark
+            FX.until = Date.now() + CFG.fadeMs;
+            FX.el.style.opacity = "0.9";
+            FX.el.style.display = "block";
+        }
+    }
+    function fadeStep(now) {
+        var a;
+        if (!FX.until) { return; }
+        a = (FX.until - now) / CFG.fadeMs;
+        if (a <= 0 || a > 1) { FX.until = 0; FX.el.style.display = "none"; return; }
+        FX.el.style.opacity = (a * 0.9).toFixed(2);
+    }
+    function wantedMode(c) {
+        var inTrack = M.mode === "track";
+        var g = inTrack ? CFG.trackStayG : CFG.trackG, r = inTrack ? CFG.trackStayRpm : CFG.trackRpm;
+        var spd = c.speed === null ? 0 : c.speed;
+        var la = c.lat_g === null ? 0 : c.lat_g, lo = c.lon_g === null ? 0 : c.lon_g;
+        var m = Math.sqrt(la * la + lo * lo);
+        if ((m > g && m <= CFG.gSane) || (c.rpm !== null && c.rpm > r)) { return "track"; }
+        if (M.mode === "standby") { return spd > CFG.moveKmh ? "street" : "standby"; }
+        return spd < CFG.stopKmh ? "standby" : "street";
+    }
+    function autoMode(now) {
+        var w, hold;
+        if (M.lock || !live || stale || !S.cur) { M.since = 0; return; }
+        w = wantedMode(S.cur);
+        if (w === M.mode) { M.since = 0; return; }
+        // Leaving TRACK: the clock runs as long as TRACK is not wanted, no
+        // matter which of the other two is. Elsewhere it restarts when the
+        // target changes.
+        if (!M.since || now < M.since || (M.mode !== "track" && w !== M.want)) { M.since = now; M.want = w; return; }
+        M.want = w;
+        hold = M.mode === "track" ? CFG.trackExitMs :
+               (w === "track" ? CFG.trackEnterMs : (w === "standby" ? CFG.standbyMs : CFG.streetMs));
+        if (now - M.since >= hold) { setMode(w); }
+    }
+    function cycleMode(dir) {
+        var i = (MODES.indexOf(M.mode) + dir + MODES.length) % MODES.length;
+        armed = 0;
+        M.lock = true;
+        setMode(MODES[i]);
+        showView();
+        toast(TXT.modes[M.mode]);
+    }
+    // commander tilt up: TRACK, now, from anywhere
+    function jumpTo(m) {
+        armed = 0;
+        M.lock = true;
+        setMode(m);
+        showView();
+        toast(TXT.modes[M.mode]);
+    }
+    // commander tilt down / tap on the status cell while locked
+    function unlock() {
+        armed = 0;
+        M.lock = false;
+        M.since = 0;
+        // Asked for by hand, so it happens now: the view the car calls for
+        // comes up at once instead of after the usual hold times.
+        if (live && !stale && S.cur) { setMode(wantedMode(S.cur)); }
+        showView();
+        toast(TXT.auto);
+    }
+    // commander press / tap: reset peak g and the timer. One stray press or
+    // a hand brushing the screen must not wipe a session, so the first press
+    // only asks and the second one, within three seconds, does it.
+    var armed = 0;
+    function press() {
+        var now = Date.now();
+        if (armed && now >= armed && now - armed < CFG.resetArmMs) { armed = 0; resetSession(); return; }
+        armed = now;
+        toast(TXT.again, true, CFG.resetArmMs);
+    }
+    function drawLock() {
+        var c = $("lockC").getContext("2d");
+        c.strokeStyle = C_AMBER; c.fillStyle = C_AMBER;
+        c.lineWidth = 3;
+        c.beginPath();
+        c.arc(8, 8, 4.5, Math.PI, 0, false);
+        c.lineTo(12.5, 10); c.moveTo(3.5, 8); c.lineTo(3.5, 10);
+        c.stroke();
+        c.fillRect(1, 9, 14, 11);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Text read-outs
+    // ─────────────────────────────────────────────────────────────
+    var el = {
+        spd: $("spdV"), rpm: $("rpmV"), gear: $("gearV"), gearAcc: $("gearAcc"),
+        cool: $("coolV"), coolS: $("coolS"),
+        gTot: $("gTotV"), gMax: $("gMax"), pk: $("pkV"),
+        gps: $("gpsV"), st: $("stV"), ses: $("sesV"),
+        dot: $("stDot"), stTxt: $("stTxt"), stSub: $("stSub"),
+        amb: $("ambV"), ambCell: $("ambCell"),
+        alerts: $("alerts"), alTop: $("alTop"),
+        ttOilD: $("ttOilD"), ttBatD: $("ttBatD"),
+        lock: $("lockC"), raw: $("raw"), rawRows: $("rawRows"), toast: $("toast")
+    };
+    el.spd._b = "vT vS";                       // view classes survive colour changes
+    el.gMax._b = "vT";
+    // BCM bytes -> what is shown. Anything not listed shows "-". The value
+    // tables are the ones the firmware itself uses (libjcimod_bcm.so,
+    // VBS_BCM_Get_PASCD_GearPosition):
+    //   gear   manual gearbox     0 neutral, 1..8 forward, 14 reverse
+    //   lever  automatic selector 1 P, 2 R, 3 N, 4..6 forward. Which of 5 and
+    //          6 is the manual gate is not in the firmware; both show "M".
+    var GEARS = { "0": "N", "1": "1", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "14": "R" };
+    var LEVERS = { "1": "P", "2": "R", "3": "N", "4": "D", "5": "M", "6": "M" };
+
+    // gear: manual position, lever: automatic selector, box: "at" / "mt" /
+    // null from the daemon. A manual car reports lever 1 for ever (it is the
+    // firmware's start value), so the lever alone does not mean "automatic".
+    function gearText(g, lever, box) {
+        var gs, ls, moving;
+        if (typeof g === "string" && g.length > 0 && g.length <= 2 && !/^[0-9]+$/.test(g)) { return g.toUpperCase(); }
+        gs = (g === null || g === undefined) ? "" : String(g);
+        ls = (lever === null || lever === undefined) ? "" : String(lever);
+        moving = gs !== "0" && GEARS.hasOwnProperty(gs);        // a real gear, forward or reverse
+        if (box !== "at" && box !== "mt") {
+            // not known yet: lever 2..6 can only be an automatic, a gear next to lever 0/1 a manual
+            box = /^[2-6]$/.test(ls) ? "at" : ((moving || !LEVERS.hasOwnProperty(ls)) ? "mt" : "at");
+        }
+        if (box === "at") {
+            // in D / M show the engaged gear, should the car report one
+            if (/^[4-6]$/.test(ls) && /^[1-8]$/.test(gs)) { return gs; }
+            return LEVERS.hasOwnProperty(ls) ? LEVERS[ls] : DASH;
+        }
+        return GEARS.hasOwnProperty(gs) ? GEARS[gs] : DASH;
+    }
+    function updateFast() {
+        var c = S.cur, v, t, lv;
+
+        v = live && c ? c.speed : null;
+        setDigits(el.spd, v === null ? "---" : String(Math.round(Math.max(0, v))));
+        setClass(el.spd, v === null ? "num cDim" : "num cWhite");
+
+        // 10 r/min steps while standing (the idle speed is worth reading),
+        // 50 while driving, where finer digits would only flicker
+        v = live && c ? c.rpm : null;
+        t = M.mode === "standby" ? 10 : 50;
+        setDigits(el.rpm, v === null ? "----" : String(Math.round(Math.max(0, v) / t) * t));
+        setClass(el.rpm, v === null ? "num s cDim" :
+            (v >= CFG.rpmRedline ? "num s cRed" : (v >= CFG.rpmWarn ? "num s cAmber" : "num s cWhite")));
+
+        t = live && c ? gearText(c.gear, c.lever, c.gearbox) : DASH;
+        setText(el.gear, t);
+        setClass(el.gear, t === DASH ? "cDim" : "cWhite");
+        setBg(el.gearAcc, !live ? C_OFF : ((v !== null && v >= CFG.rpmRedline) ? C_RED :
+            ((v !== null && v >= CFG.rpmWarn) ? C_AMBER : C_CYAN)));
+
+        // coolant: number, and in STANDBY the plain word for it
+        v = live && c ? c.coolant : null;
+        lv = v === null ? -1 : coolLevel(v);
+        setDigits(el.cool, v === null ? "--" : String(Math.round(v)));
+        setClass(el.cool, v === null ? "num s cDim" : "num s " + COOL_CLASSES[lv]);
+        setText(el.coolS, lv < 0 ? "" : TXT.cool[lv]);
+        if (el.coolS._lv !== lv) { el.coolS._lv = lv; el.coolS.style.color = lv < 0 ? C_OFF : COOL_COLORS[lv]; }
+    }
+    // Read-outs that would be a blur if they followed every sample. The dot
+    // and the bars carry the fast movement; these are for the glance after.
+    function updateMed() {
+        var c = S.cur, v, m;
+
+        if (live && c && c.lat_g !== null && c.lon_g !== null) {
+            m = Math.round(Math.sqrt(c.lat_g * c.lat_g + c.lon_g * c.lon_g) * 10) / 10;
+            setDigits(el.gTot, m.toFixed(1));      // one decimal: "0.8" is read, "0.847" is parsed
+            setClass(el.gTot, m >= 1.0 ? "num s cAmber" : "num s cWhite");
+        } else {
+            setDigits(el.gTot, "-.-");
+            setClass(el.gTot, "num s cDim");
+        }
+
+        v = live && c ? c.gps_speed : null;
+        setDigits(el.gps, v === null ? "---" : String(Math.round(Math.max(0, v))));
+        setClass(el.gps, v === null ? "num s cDim" : "num s cWhite");
+
+        v = live && c ? c.steering : null;
+        setDigits(el.st, v === null ? "---" : fixed(v, 0, false) + "\u00b0");
+        setClass(el.st, v === null ? "num s cDim" : "num s cWhite");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Warnings: oil pressure, charging, coolant. A block appears in the
+    // strip (and a red bar along the top edge), blinks at 1 Hz for a few
+    // seconds to be noticed, then stays lit without nagging.
+    // ─────────────────────────────────────────────────────────────
+    var AL = {
+        oil: { el: $("alOil"), since: 0, on: 0 },
+        bat: { el: $("alBat"), since: 0, on: 0 },
+        tmp: { el: $("alTmp"), since: 0, on: 0 }
+    };
+    // 0 = off, 1 = lit, 2 = lit and still blinking
+    function alertStep(a, cond, now, hold, low) {
+        var young;
+        if (!cond) { a.since = 0; a.on = 0; showIf(a.el, false, "inline-block"); return 0; }
+        if (!a.since || now < a.since) { a.since = now; }
+        if (!a.on) {
+            if (now - a.since < hold) { return 0; }
+            a.on = now;
+        }
+        if (now < a.on) { a.on = now; }
+        young = now - a.on < CFG.warnBlinkMs;
+        showIf(a.el, true, "inline-block");
+        setBg(a.el, (young && low) ? C_RED_LOW : C_RED);
+        return young ? 2 : 1;
+    }
+    function updateAlerts(now) {
+        var c = live ? S.cur : null, low = Math.floor(now / 500) % 2 === 1, run, hot, n;
+        // With the engine stopped both lamps are lit on every car. Only an
+        // engine that is known to be stopped silences them.
+        run = !!c && (c.rpm === null || c.rpm >= CFG.engineRpm);
+        hot = !!c && c.coolant !== null && c.coolant >= CFG.coolCrit - (AL.tmp.on ? 2 : 0);
+        if (hot) { setText(AL.tmp.el, TXT.temp + " " + Math.round(c.coolant) + "\u00b0C"); }
+        n = Math.max(alertStep(AL.oil, run && c.oil, now, CFG.warnHoldMs, low),
+                     alertStep(AL.bat, run && c.batt, now, CFG.warnHoldMs, low),
+                     alertStep(AL.tmp, hot, now, 0, low));
+        showIf(el.alerts, n > 0, "block");
+        showIf(el.alTop, n > 0, "block");
+        if (n > 0) { setBg(el.alTop, (n === 2 && low) ? C_RED_LOW : C_RED); }
+    }
+
+    function updateSlow(now, state) {
+        var s = Math.max(0, Math.floor((now - session.start) / 1000)), h, v, c = live ? S.cur : null, run;
+        h = Math.floor(s / 3600);
+        setDigits(el.ses, (h > 0 ? h + ":" : "") + pad2(Math.floor(s % 3600 / 60)) + ":" + pad2(s % 60));
+        setDigits(el.gMax, PK.tot > 0 ? PK.tot.toFixed(2) : "-.--");
+        setClass(el.gMax, PK.tot > 0 ? "num cAmber" : "num cDim");
+        setDigits(el.pk, PK.tot > 0 ? PK.tot.toFixed(2) : "-.--");
+        setClass(el.pk, PK.tot > 0 ? "num s cAmber" : "num s cDim");
+
+        // status cell: data link on the first line, the view (and its lock) on the second
+        if (state === "live") {
+            status(C_CYAN, OPT.demo ? TXT.demo : TXT.live, "#ffffff");
+        } else if (state === "stale") {
+            status(C_AMBER, TXT.stale, C_AMBER);
+        } else if (state === "idle") {
+            status(C_LABEL, TXT.waking, "#c8c8c8");
+        } else if (state === "wait") {
+            status(C_LABEL, TXT.conn, "#c8c8c8");
+        } else {
+            status(C_AMBER, TXT.off, C_AMBER);
+        }
+        showView();
+
+        // outside temperature: only when the car reports one
+        v = c ? c.ambient : null;
+        if (el.ambCell._vis !== (v !== null)) {
+            el.ambCell._vis = v !== null;
+            el.ambCell.style.visibility = v !== null ? "visible" : "hidden";
+        }
+        if (v !== null) { setDigits(el.amb, fixed(Math.round(v), 0, false)); }
+
+        // tell-tales (STANDBY): green only when the engine runs and the car
+        // says "no warning"; red on a warning; grey when there is no telling
+        run = !!c && c.rpm !== null && c.rpm >= CFG.engineRpm;
+        setBg(el.ttOilD, !c ? C_OFF : (c.oil ? (c.rpm === null || run ? C_RED : C_OFF) : (run && c.oilOk ? C_GREEN : C_OFF)));
+        setBg(el.ttBatD, !c ? C_OFF : (c.batt ? (c.rpm === null || run ? C_RED : C_OFF) : (run && c.battOk ? C_GREEN : C_OFF)));
+
+        if (rawOn) { updateRaw(now); }
+        saveState();
+    }
+    // second line of the status cell: the view, amber with a padlock while locked
+    function showView() {
+        setText(el.stSub, TXT.modes[M.mode]);
+        if (el.lock._on !== M.lock) {
+            el.lock._on = M.lock;
+            el.lock.style.display = M.lock ? "block" : "none";
+            el.stSub.style.color = M.lock ? C_AMBER : C_LABEL;
+        }
+    }
+    function showIf(elm, on, how) {
+        if (elm._on !== on) { elm._on = on; elm.style.display = on ? how : "none"; }
+    }
+    function status(dot, txt, color) {
+        setBg(el.dot, dot);
+        if (el.stTxt._col !== color) { el.stTxt._col = color; el.stTxt.style.color = color; }
+        setText(el.stTxt, txt);
+    }
+
+    var toastTimer = null;
+    // ask = true: amber, a question that waits for a second press
+    function toast(msg, ask, ms) {
+        el.toast.textContent = msg;
+        el.toast.className = ask ? "ask" : "";
+        el.toast.style.display = "block";
+        if (toastTimer) { clearTimeout(toastTimer); }
+        toastTimer = setTimeout(function () { el.toast.style.display = "none"; toastTimer = null; }, ms || 1400);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Calibration panel: raw bus values next to the converted ones, so the
+    // scale factors in /data/nd2cn/dashboard.conf can be checked on the car.
+    // ─────────────────────────────────────────────────────────────
+    var rawOn = false, rawEls = [], fps = 60;
+    var RAW_ROWS = [                           // [raw key, value key]; row names are TXT.rows
+        ["rpm", "rpm"], ["thr", "throttle"], ["steer", "steering"], ["latg", "lat_g"], ["lon", "lon_g"],
+        ["cool", "coolant"], ["vss", null], ["spd", "speed"], ["gear", "#gear"], ["lever", "gearbox"],
+        [null, "brake"], [null, "gps_speed"], [null, "gps_heading"], [null, "#warn"],
+        ["#seq", "hz"], ["#sig", "#age"]
+    ];
+    function buildRaw() {
+        var i, row, a, b, n;
+        for (i = 0; i < RAW_ROWS.length; i++) {
+            row = D.createElement("div"); row.className = "rr"; row.style.top = (i * 18) + "px";
+            n = D.createElement("span"); n.className = "rn"; n.textContent = TXT.rows[i];
+            a = D.createElement("span"); a.className = "ra";
+            b = D.createElement("span"); b.className = "rb";
+            row.appendChild(n); row.appendChild(a); row.appendChild(b);
+            el.rawRows.appendChild(row);
+            rawEls.push([a, b]);
+        }
+    }
+    function show(v) {
+        if (v === null || v === undefined) { return DASH; }
+        if (typeof v === "number" && v % 1 !== 0) { return String(Math.round(v * 10000) / 10000); }
+        return String(v);
+    }
+    function updateRaw(now) {
+        var o = S.obj || {}, r = o.raw || {}, i, ka, kb, a, b;
+        for (i = 0; i < RAW_ROWS.length; i++) {
+            ka = RAW_ROWS[i][0]; kb = RAW_ROWS[i][1];
+            a = ka === null ? "" : (ka === "#seq" ? show(o.seq) : (ka === "#sig" ? show(o.sig) : show(r[ka])));
+            b = kb === null ? "" : (kb === "#age" ? (S.lastChange ? (now - S.lastChange) + " ms" : DASH) : show(o[kb]));
+            if (kb === "hz") { b = show(o.hz) + " / " + Math.round(fps) + " fps"; }
+            if (kb === "#warn") { b = show(o.oil_warn) + " / " + show(o.batt_warn); }
+            if (kb === "#gear") { b = gearText(o.gear, o.lever, o.gearbox); }       // what the gear box shows
+            setText(rawEls[i][0], a);
+            setText(rawEls[i][1], b);
+        }
+    }
+    function toggleRaw(on) {
+        var c = S.cur;
+        if (on === undefined) {
+            on = !rawOn;
+            // It covers the friction circle, so it only opens standing still.
+            // Once open it stays, for a passenger checking the g scale.
+            if (on && live && c && c.speed !== null && c.speed > CFG.moveKmh) { toast(TXT.parked); return; }
+        }
+        rawOn = on;
+        if (rawOn && rawEls.length === 0) { buildRaw(); }
+        el.raw.style.display = rawOn ? "block" : "none";
+        if (rawOn) { updateRaw(Date.now()); }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Frame loop
+    // ─────────────────────────────────────────────────────────────
+    var raf = W.requestAnimationFrame || W.oRequestAnimationFrame || W.webkitRequestAnimationFrame ||
+              W.mozRequestAnimationFrame || W.msRequestAnimationFrame ||
+              function (cb) { return W.setTimeout(cb, 16); };
+    var F = { last: 0, fast: 0, med: 0, slow: 0, ema: 16, slowSince: 0, okSince: 0, skip: false, drew: false };
+
+    // bars follow the data while live and fall back to zero when it stops
+    function follow(key, target, dt) {
+        if (target === null) {
+            shown[key] *= Math.pow(0.5, dt / 90);
+            if (shown[key] < 0.5) { shown[key] = 0; }
+        } else {
+            shown[key] = target;
+        }
+    }
+    // Presto draws the canvas in software. If frames get slow, drop the trail
+    // glow first, then halve the frame rate; recover when there is headroom.
+    function adaptQuality(now, dt) {
+        F.ema += (dt - F.ema) * 0.05;
+        fps = 1000 / Math.max(1, F.ema);
+        if (F.ema > 30) {
+            F.okSince = now;
+            if (!F.slowSince) { F.slowSince = now; }
+            if (now - F.slowSince > 2500 && quality > 0) { quality--; F.slowSince = now; }
+        } else {
+            F.slowSince = 0;
+            if (!F.okSince) { F.okSince = now; }
+            if (F.ema < 19 && now - F.okSince > 20000 && quality < 2) { quality++; F.okSince = now; }
+        }
+    }
+    function frame() {
+        var now = Date.now(), dt = F.last ? now - F.last : 16, sample = F.drew, state;
+        raf(frame);
+        if (dt < 0 || dt > 1000) { dt = 16; }         // clock jumped (GPS time sync)
+        F.last = now;
+        // dt is the interval since the previous callback, i.e. the time that
+        // callback took. Only an interval in which a frame was rendered says
+        // anything about render cost: at quality 0 the interval after a
+        // skipped frame costs ~0 ms and would drag F.ema down (quality 0 <-> 1
+        // oscillation). Measuring render-to-render instead would span a skip
+        // plus a render (>= 2 timer periods), so quality 0 could never recover.
+        if (sample) { adaptQuality(now, dt); }
+        F.drew = false;
+        if (quality === 0) {                          // slow unit: draw every other frame
+            F.skip = !F.skip;
+            if (F.skip) { return; }
+        }
+        F.drew = true;
+
+        if (S.lastChange > now) { S.lastChange = now; S.tCur = now; }
+        if (!S.cur) {
+            state = (now - T0 < 2500) ? "wait" : "offline";
+        } else if (now - S.lastChange > CFG.staleMs) {
+            state = "offline";
+        } else if (S.cur.idle) {
+            state = "idle";
+        } else {
+            // the daemon writes 20 times a second; half a second of silence
+            // means the numbers on screen can no longer be trusted
+            state = now - S.lastChange > CFG.softMs ? "stale" : "live";
+        }
+        live = state === "live" || state === "stale";
+        if (stale !== (state === "stale")) { stale = state === "stale"; appClass(); }
+        if (live) { interpolate(now, V); }
+
+        follow("rpm", live ? V.rpm : null, dt);
+        follow("thr", live ? V.throttle : null, dt);
+        follow("brk", live ? V.brake : null, dt);
+
+        autoMode(now);
+        fadeStep(now);
+        if (M.mode === "track") {
+            drawGBg();
+            drawG(now);
+            drawPedals();
+            drawSteer();
+        }
+        drawRpm(now);
+        drawCool(now);
+
+        if (now - F.fast >= 50 || now < F.fast) { F.fast = now; updateFast(); updateAlerts(now); }
+        if (now - F.med >= 200 || now < F.med) { F.med = now; updateMed(); }
+        if (now - F.slow >= 250 || now < F.slow) { F.slow = now; updateSlow(now, state); }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Input
+    // ─────────────────────────────────────────────────────────────
+    // Every input has one meaning, whatever the state, so the commander can
+    // be worked without looking at the screen.
+    function onKey(k) {
+        if (k === "select") { press(); }
+        else if (k === "cw") { cycleMode(1); }
+        else if (k === "ccw") { cycleMode(-1); }
+        else if (k === "up") { jumpTo("track"); }
+        else if (k === "down") { unlock(); }
+        else if (k === "left" || k === "right") { toggleRaw(); }
+    }
+    W.addEventListener("message", function (e) {
+        var d = e ? e.data : null;
+        if (typeof d !== "string" || d.indexOf("nd2cn-dash:") !== 0) { return; }
+        d = d.substring(11);
+        if (d.indexOf("key:") === 0) { onKey(d.substring(4)); }
+        else if (d.indexOf("init:") === 0) { loadState(d.substring(5)); }
+    }, false);
+
+    // Touch mirrors the commander.
+    //   swipe left / right   next / previous view, locked   = commander rotate
+    //   tap  <               close                          = commander Back
+    //   tap status cell      locked: back to automatic      = commander tilt down
+    //                        automatic: calibration         = commander tilt left / right
+    //   tap the panel        close it
+    //   tap anywhere else    reset peaks (asks first)       = commander press
+    (function () {
+        var downX = null;
+        function tap(n) {
+            var id;
+            while (n && n !== app) {
+                id = n.id;
+                if (id === "back") {
+                    if (W.parent && W.parent !== W) { post("close"); }
+                    else { try { W.history.back(); } catch (err) {} }
+                    return;
+                }
+                if (id === "stCell" && M.lock) { unlock(); return; }
+                if (id === "stCell" || id === "raw") { toggleRaw(); return; }
+                n = n.parentNode;
+            }
+            press();
+        }
+        app.onmousedown = function (e) { downX = (e || W.event).clientX; };
+        app.onmouseup = function (e) {
+            var ev = e || W.event, dx;
+            if (downX === null) { return; }
+            dx = ev.clientX - downX;
+            downX = null;
+            if (dx <= -60) { cycleMode(1); }
+            else if (dx >= 60) { cycleMode(-1); }
+            else { tap(ev.target || ev.srcElement); }
+        };
+    })();
+    D.onselectstart = function () { return false; };
+
+    // ─────────────────────────────────────────────────────────────
+    // Start
+    // ─────────────────────────────────────────────────────────────
+    applyLabels();
+    V = blank();
+    setMode("standby");
+    if (OPT.view === "standby" || OPT.view === "street" || OPT.view === "track") { M.lock = true; setMode(OPT.view); }
+    AL.oil.el.textContent = TXT.oil;
+    AL.bat.el.textContent = TXT.batt;
+    $("ttOilT").textContent = TXT.ttOil;
+    $("ttBatT").textContent = TXT.ttBat;
+    drawBack();
+    drawLock();
+    if (OPT.raw) { toggleRaw(true); }
+    updateFast();
+    updateMed();
+    updateAlerts(Date.now());
+    updateSlow(Date.now(), "wait");
+    if (OPT.demo) { demoTick(); } else { poll(); }
+    raf(frame);
+    post("ready");
+})();
+</script>
+</body>
+</html>
