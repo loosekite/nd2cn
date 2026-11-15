@@ -44,6 +44,32 @@ nd2cn_log "nd2cn $ND2CN_VERSION installer started"
 [ "$ND2CN_CHECK_MODE" = "1" ] && nd2cn_log "CHECK MODE — no modifications will be made"
 nd2cn_log "=========================================="
 
+# ── System probe: collect diagnostic info before anything else ──
+nd2cn_log "--- SYSTEM PROBE ---"
+nd2cn_log "USB source: $REPO_DIR"
+nd2cn_log "Date: $(date 2>/dev/null)"
+nd2cn_log "Kernel: $(uname -a 2>/dev/null)"
+nd2cn_log "BusyBox: $(busybox 2>&1 | head -1)"
+if [ -f /jci/version.ini ]; then
+    nd2cn_log "FW version: $(grep JCI_SW_VER= /jci/version.ini | head -1)"
+    nd2cn_log "FW patch: $(grep JCI_SW_VER_PATCH= /jci/version.ini | head -1)"
+    nd2cn_log "FW flavor: $(grep JCI_SW_FLAVOR= /jci/version.ini | head -1)"
+    nd2cn_log "HU model: $(grep HUModel /jci/settings/configurations/maz_cmu-root.xml 2>/dev/null | head -1)"
+fi
+nd2cn_log "Rootfs mount: $(grep ' / ' /proc/mounts 2>/dev/null)"
+nd2cn_log "Data mount: $(grep '/data ' /proc/mounts 2>/dev/null || grep '/mnt/data ' /proc/mounts 2>/dev/null)"
+nd2cn_log "Free space /data: $(df /data 2>/dev/null | tail -1)"
+nd2cn_log "Free space /tmp: $(df /tmp 2>/dev/null | tail -1)"
+nd2cn_log "Watchdog: $(cat '/sys/class/gpio/Watchdog Disable/value' 2>/dev/null || echo 'not found')"
+nd2cn_log "Opera running: $(pidof opera 2>/dev/null || echo 'no')"
+nd2cn_log "sshd running: $(pidof sshd 2>/dev/null || echo 'no')"
+nd2cn_log "Settings cache: $(find /data/com/jci/cpp/settings -name '*.bin' 2>/dev/null | wc -l) .bin files"
+nd2cn_log "Existing nd2cn: $(cat /data/nd2cn/installed 2>/dev/null || echo 'none')"
+nd2cn_log "GuiConfig exists: $([ -f /data/integration/developer_mode_GuiConfig.js ] && echo 'yes' || echo 'no')"
+nd2cn_log "Language XML current: $(grep LanguageDisplayStrings /jci/settings/configurations/maz_cmu-root.xml 2>/dev/null | head -1)"
+nd2cn_log "USB contents: $(ls "$REPO_DIR"/plugins/*.sh 2>/dev/null | wc -l) plugins, $(ls "$REPO_DIR"/plugins/optional/*.sh 2>/dev/null | wc -l) optional"
+nd2cn_log "--- END SYSTEM PROBE ---"
+
 # ── Firmware check ──
 if ! nd2cn_check_firmware; then
     nd2cn_dialog_ok "nd2cn" "Unsupported firmware.\nOnly 74.00.324/324A is supported.\n\nNo changes were made."
