@@ -18,7 +18,6 @@ PLUGIN_DESC="Clear stale u-blox almanac/ephemeris once at next boot (imported ca
 PLUGIN_RISK="low"
 # requires: 00-boot-hook
 
-P18_TAG="18-gps-reset"
 P18_BOOT_SCRIPT="$ND2CN_BOOT_DIR/18-gps-reset.sh"
 P18_FLAG="$ND2CN_DIR/gps-reset.done"
 

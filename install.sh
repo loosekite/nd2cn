@@ -67,6 +67,7 @@ nd2cn_log "Settings cache: $(find /data/com/jci/cpp/settings -name '*.bin' 2>/de
 nd2cn_log "Existing nd2cn: $(cat /data/nd2cn/installed 2>/dev/null || echo 'none')"
 nd2cn_log "GuiConfig exists: $([ -f /data/integration/developer_mode_GuiConfig.js ] && echo 'yes' || echo 'no')"
 nd2cn_log "Language XML current: $(grep LanguageDisplayStrings /jci/settings/configurations/maz_cmu-root.xml 2>/dev/null | head -1)"
+# shellcheck disable=SC2012  # diagnostic count only; plugin filenames are controlled (no newlines)
 nd2cn_log "USB contents: $(ls "$REPO_DIR"/plugins/*.sh 2>/dev/null | wc -l) plugins, $(ls "$REPO_DIR"/plugins/optional/*.sh 2>/dev/null | wc -l) optional"
 nd2cn_log "--- END SYSTEM PROBE ---"
 
@@ -216,6 +217,7 @@ while IFS='|' read -r _file _name _risk _desc; do
         # Keep the code that touched the system, for uninstall.sh. Stored only
         # after a successful apply: if apply fails, the previously stored copy
         # (matching the state an earlier successful apply left) is kept.
+        # shellcheck disable=SC2015  # the warning is intentional whenever cp OR mv fails (store is best-effort)
         cp "$_norm" "$ND2CN_PLUGIN_STORE/$_file.tmp" 2>/dev/null && \
             mv -f "$ND2CN_PLUGIN_STORE/$_file.tmp" "$ND2CN_PLUGIN_STORE/$_file" || \
             nd2cn_log "WARN: could not store a copy of $_file for uninstall"

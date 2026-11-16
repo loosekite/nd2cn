@@ -139,6 +139,7 @@ fi
 # ── Dependency guard (partial uninstall only) ──
 if [ "$_full" = "0" ]; then
     : > "$WORK/order.ok"
+    # shellcheck disable=SC2094  # $WORK/order is only read in this loop; it is rewritten (order.ok) afterwards
     while IFS= read -r _t; do
         _tid=$(basename "$_t" .sh)
         _blocker=""

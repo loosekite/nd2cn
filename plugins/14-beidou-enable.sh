@@ -57,7 +57,6 @@ P14_GLO_ID_OFFSET=41666        # 0xa2c2: block 6 gnssId (expect 06)
 P14_GLO_FLAG_OFFSET=41670      # 0xa2c6: block 6 flags byte 0
 
 P14_TARGET="00 01 00"          # Galileo BeiDou GLONASS
-P14_STOCK="00 00 01"
 
 # Verify the structure of FILE; prints "gal bei glo" flag bytes on success.
 _p14_inspect() {

@@ -848,6 +848,7 @@ nd2cn_plugin_meta() {
         trap - EXIT INT TERM HUP
         unset -f plugin_check plugin_apply plugin_remove 2>/dev/null
         PLUGIN_NAME=""; PLUGIN_DESC=""; PLUGIN_RISK=""
+        # shellcheck source=/dev/null  # plugin path is dynamic (resolved at runtime)
         . "$1" > /dev/null 2>&1 || exit 1
         if [ -z "$PLUGIN_NAME" ]; then
             nd2cn_log "ERROR: $(basename "$1"): PLUGIN_NAME not set"
@@ -883,6 +884,7 @@ nd2cn_plugin_run() {
         PLUGIN_NAME=""; PLUGIN_DESC=""; PLUGIN_RISK=""
         ND2CN_PLUGIN_FILE="$1"
         ND2CN_PLUGIN_ID=$(nd2cn_plugin_id "$1")
+        # shellcheck source=/dev/null  # plugin path is dynamic (resolved at runtime)
         . "$1" || exit 1
         if ! command -v "$2" > /dev/null 2>&1; then
             nd2cn_log "ERROR: $2 not defined"

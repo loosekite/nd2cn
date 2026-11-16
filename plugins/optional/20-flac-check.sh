@@ -27,7 +27,6 @@ PLUGIN_NAME="flac-check"
 PLUGIN_DESC="Diagnose FLAC decoder support into /data/nd2cn/flac_status.txt (changes nothing)"
 PLUGIN_RISK="low"
 
-P22_TAG="22-flac-enable"
 P22_REGISTRY="$FIRMWARE_ROOT/usr/share/beep_registry.arm12.cf"
 P22_CODEC_DIR="$FIRMWARE_ROOT/usr/lib/imx-mm/audio-codec"
 P22_GST_DIR="$FIRMWARE_ROOT/usr/lib/gstreamer-0.10"

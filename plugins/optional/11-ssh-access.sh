@@ -105,6 +105,7 @@ plugin_apply() {
     _p11_added=0
     for _p11_key in "$P11_KEY_SRC"/*.pub; do
         [ -f "$_p11_key" ] || continue
+        # shellcheck disable=SC2094  # basename reads the path string, not the file; no read/write conflict
         while IFS= read -r _p11_line || [ -n "$_p11_line" ]; do
             _p11_line=$(printf '%s' "$_p11_line" | tr -d '\r')
             case "$_p11_line" in ''|'#'*) continue ;; esac

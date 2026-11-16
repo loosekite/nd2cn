@@ -1,0 +1,21 @@
+# ShellCheck configuration for nd2cn
+# Run:  shellcheck install.sh uninstall.sh lib/*.sh plugins/*.sh plugins/optional/*.sh app/*.sh
+#
+# SC2034 (unused variable) is disabled project-wide because this codebase is
+# built on a sourcing contract that ShellCheck cannot trace across `.` (source)
+# boundaries:
+#   - lib/helpers.sh sources each plugin and reads its PLUGIN_NAME / PLUGIN_DESC
+#     / PLUGIN_RISK metadata (see nd2cn_plugin_meta).
+#   - lib/helpers.sh exports ND2CN_* config vars (ND2CN_BOOT_DIR, ND2CN_SRC_DIR,
+#     ND2CN_PLUGIN_STORE, ...) that plugins consume after sourcing it.
+# These read sites are invisible to a single-file analysis, so SC2034 fires on
+# every one of them as a false positive. Genuinely dead variables should be
+# deleted at the source rather than relying on this suppression.
+disable=SC2034
+
+# Let ShellCheck follow `. lib/helpers.sh` so cross-file definitions resolve
+# instead of raising SC1090/SC1091.
+external-sources=true
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/lib
+source-path=SCRIPTDIR/..

@@ -1,0 +1,4 @@
+# The car runs these with BusyBox ash, which breaks on CRLF line endings.
+# Force LF on checkout, including Windows clones with core.autocrlf=true.
+* text=auto eol=lf
+*.up binary
