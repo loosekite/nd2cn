@@ -140,7 +140,7 @@ COOL_SCALE=1            # SMDB EngClnt_Te_Actl (one byte): 1 degree C per bit ..
 COOL_OFFSET=-40         #   ... with the usual CAN offset of -40 (use 0 if it reads 40 too low)
 VSS_SCALE=0.01          # Veh_V_ActlEng: 0.01 km/h per bit
 SPEED_UNIT=0            # argument of GetCarSpeed (0 = km/h)
-SPEED_DIV=1             # GetCarSpeed result is divided by this (100 if it reports 0.01 km/h)
+SPEED_DIV=100           # GetCarSpeed result is divided by this (100: reports 0.01 km/h on MX-5 ND2)
 
 # shellcheck disable=SC1090
 [ -r "$CONF" ] && . "$CONF"
@@ -635,8 +635,12 @@ tick() {
     read_signals                        # written by awk while we were polling (or a tick ago)
     was_read && LAST_SEEN=$NOW_CS       # the page read the file armed a second ago
 
-    if [ "$r_spd" = "null" ]; then
-        speed=$v_vss                    # BCM silent: use the pushed wheel speed
+    # Prefer VDT wheel speed (pushed signal, always current) over BCM
+    # (polled, may return a stale cached value when stationary on some firmware)
+    if [ "$v_vss" != "null" ]; then
+        speed=$v_vss
+    elif [ "$r_spd" = "null" ]; then
+        speed=null
     elif [ "$SPEED_DIV" = "1" ]; then
         speed=$r_spd
     else

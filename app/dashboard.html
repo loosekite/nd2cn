@@ -61,8 +61,8 @@
         rotate          / swipe left-right    next / previous view, locked
         tilt up                               TRACK view, now, locked
         tilt down       / tap the status cell back to automatic
-        press, press    / tap, tap            reset peak g and timer (the first
-                                              press asks, 3 s to confirm)
+        press           / tap timer            start / pause the timer; double-tap
+                                              to reset while stopped
         Back            / tap  <              close
         tilt left-right / tap the status cell calibration panel on / off;
                           (while automatic)   it only opens standing still
@@ -185,6 +185,7 @@ body {
 .rn { left: 0; color: #b4b7ba; white-space: nowrap; }
 .ra { left: 118px; width: 80px; text-align: right; color: #c8c8c8; white-space: nowrap; }
 .rb { left: 202px; width: 118px; text-align: right; color: #ffffff; white-space: nowrap; }
+
 
 /* ── view change: a short dip to dark instead of a hard cut ── */
 #fade { left: 0; top: 0; width: 800px; height: 336px; display: none; background: #050707; }
@@ -678,7 +679,7 @@ body {
         // raw numbers as the car sends them: unsigned, 0 g = 4000, wheel centre = 16000
         o.raw = { rpm: Math.round(rpm / 2), thr: Math.round(o.throttle * 10), steer: Math.round(o.steering * 10) + 16000,
                   latg: Math.round(lat * 1000) + 4000, lon: Math.round(lon * 1000) + 4000,
-                  cool: o.coolant + 40, vss: Math.round(spd * 100), spd: o.speed, gear: g, lever: 1 };
+                  cool: o.coolant + 40, vss: Math.round(spd * 100), spd: Math.round(spd * 100), gear: g, lever: 1 };
         onSample(o, Date.now());
         setTimeout(demoTick, 50);
     }
@@ -688,7 +689,9 @@ body {
     // the dashboard is closed, and everything is gone at power-off.
     // ─────────────────────────────────────────────────────────────
     var PK = { l: 0, r: 0, t: 0, b: 0, tot: 0, ver: 0 };
-    var session = { start: Date.now(), sent: "", saveFrom: Date.now() + 1000 };
+    // Manual timer: stopped | running | paused. Starts only on user action.
+    var timer = { state: "stopped", elapsed: 0, ref: 0 };
+    var session = { sent: "", saveFrom: Date.now() + 1000 };
     var GS = CFG.gBall ? { x: -1, y: 1 } : { x: 1, y: -1 };   // g -> screen direction
 
     function trackPeaks(c) {
@@ -706,23 +709,43 @@ body {
     }
     function resetSession() {
         PK.l = PK.r = PK.t = PK.b = PK.tot = 0; PK.ver++;
-        session.start = Date.now();
+        timer.state = "stopped"; timer.elapsed = 0; timer.ref = 0;
         trail.n = 0;
         toast(TXT.reset, false, 1400);
     }
+    function timerToggle() {
+        if (timer.state === "stopped" || timer.state === "paused") {
+            timer.state = "running";
+            timer.ref = Date.now();
+        } else {
+            timer.elapsed += Date.now() - timer.ref;
+            timer.state = "paused";
+        }
+    }
+    function timerReset() {
+        if (timer.state !== "stopped") {
+            timer.state = "stopped"; timer.elapsed = 0; timer.ref = 0;
+            toast(TXT.reset, false, 1400);
+        }
+    }
+    function timerMs() {
+        if (timer.state === "running") { return timer.elapsed + (Date.now() - timer.ref); }
+        return timer.elapsed;
+    }
     function saveState() {
         var s;
-        // Not in the first second: the loader answers "ready" with the state
-        // it kept from last time, and a fresh page must not overwrite that.
         if (Date.now() < session.saveFrom) { return; }
-        s = JSON.stringify({ s: session.start, p: [PK.l, PK.r, PK.t, PK.b, PK.tot], m: M.lock ? M.mode : "" });
+        s = JSON.stringify({ te: timer.elapsed, ts: timer.state, p: [PK.l, PK.r, PK.t, PK.b, PK.tot], m: M.lock ? M.mode : "" });
         if (s !== session.sent) { session.sent = s; post("state:" + s); }
     }
     function loadState(text) {
         var o, p;
         try { o = JSON.parse(text); } catch (e) { return; }
-        if (!o || !isNum(o.s) || o.s > Date.now()) { return; }
-        session.start = o.s;
+        if (!o) { return; }
+        if (isNum(o.te) && o.te >= 0) {
+            timer.elapsed = o.te;
+            timer.state = (o.ts === "running" || o.ts === "paused") ? "paused" : "stopped";
+        }
         p = o.p;
         if (p && p.length === 5 && isNum(p[0]) && isNum(p[1]) && isNum(p[2]) && isNum(p[3]) && isNum(p[4])) {
             PK.l = p[0]; PK.r = p[1]; PK.t = p[2]; PK.b = p[3]; PK.tot = p[4]; PK.ver++;
@@ -1151,14 +1174,15 @@ body {
     // null from the daemon. A manual car reports lever 1 for ever (it is the
     // firmware's start value), so the lever alone does not mean "automatic".
     function gearText(g, lever, box) {
-        var gs, ls, moving;
+        var gs, ls;
         if (typeof g === "string" && g.length > 0 && g.length <= 2 && !/^[0-9]+$/.test(g)) { return g.toUpperCase(); }
         gs = (g === null || g === undefined) ? "" : String(g);
         ls = (lever === null || lever === undefined) ? "" : String(lever);
-        moving = gs !== "0" && GEARS.hasOwnProperty(gs);        // a real gear, forward or reverse
         if (box !== "at" && box !== "mt") {
-            // not known yet: lever 2..6 can only be an automatic, a gear next to lever 0/1 a manual
-            box = /^[2-6]$/.test(ls) ? "at" : ((moving || !LEVERS.hasOwnProperty(ls)) ? "mt" : "at");
+            // not known yet: lever 2..6 can only be an automatic; otherwise default
+            // to MT (on a real MT, lever is always 1; on AT in P, "N" is functionally
+            // equivalent until the first shift resolves the detection)
+            box = /^[2-6]$/.test(ls) ? "at" : "mt";
         }
         if (box === "at") {
             // in D / M show the engaged gear, should the car report one
@@ -1171,6 +1195,7 @@ body {
         var c = S.cur, v, t, lv;
 
         v = live && c ? c.speed : null;
+        if (v !== null && v > 400) { v = null; }
         setDigits(el.spd, v === null ? "---" : String(Math.round(Math.max(0, v))));
         setClass(el.spd, v === null ? "num cDim" : "num cWhite");
 
@@ -1260,9 +1285,14 @@ body {
     }
 
     function updateSlow(now, state) {
-        var s = Math.max(0, Math.floor((now - session.start) / 1000)), h, v, c = live ? S.cur : null, run;
+        var ms = timerMs(), s = Math.max(0, Math.floor(ms / 1000)), t10 = Math.floor(ms / 100) % 10;
+        var h, v, c = live ? S.cur : null, run, sesTxt, sesCls;
         h = Math.floor(s / 3600);
-        setDigits(el.ses, (h > 0 ? h + ":" : "") + pad2(Math.floor(s % 3600 / 60)) + ":" + pad2(s % 60));
+        sesTxt = (h > 0 ? h + ":" : "") + pad2(Math.floor(s % 3600 / 60)) + ":" + pad2(s % 60) + "." + t10;
+        setDigits(el.ses, sesTxt);
+        sesCls = timer.state === "running" ? "num s cWhite" :
+                 (timer.state === "paused" ? (Math.floor(now / 500) % 2 ? "num s cAmber" : "num s cDim") : "num s cDim");
+        setClass(el.ses, sesCls);
         setDigits(el.gMax, PK.tot > 0 ? PK.tot.toFixed(2) : "-.--");
         setClass(el.gMax, PK.tot > 0 ? "num cAmber" : "num cDim");
         setDigits(el.pk, PK.tot > 0 ? PK.tot.toFixed(2) : "-.--");
@@ -1475,7 +1505,7 @@ body {
     // Every input has one meaning, whatever the state, so the commander can
     // be worked without looking at the screen.
     function onKey(k) {
-        if (k === "select") { press(); }
+        if (k === "select") { timerToggle(); }
         else if (k === "cw") { cycleMode(1); }
         else if (k === "ccw") { cycleMode(-1); }
         else if (k === "up") { jumpTo("track"); }
@@ -1499,13 +1529,25 @@ body {
     //   tap anywhere else    reset peaks (asks first)       = commander press
     (function () {
         var downX = null;
+        var sesLastTap = 0;
         function tap(n) {
-            var id;
+            var id, tapNow;
             while (n && n !== app) {
                 id = n.id;
                 if (id === "back") {
                     if (W.parent && W.parent !== W) { post("close"); }
                     else { try { W.history.back(); } catch (err) {} }
+                    return;
+                }
+                if (id === "sesCell" || id === "sesV") {
+                    tapNow = Date.now();
+                    if (timer.state === "stopped" && timer.elapsed > 0) {
+                        timerReset();
+                    } else if (tapNow - sesLastTap < 400) {
+                        timerReset(); sesLastTap = 0;
+                    } else {
+                        timerToggle(); sesLastTap = tapNow;
+                    }
                     return;
                 }
                 if (id === "stCell" && M.lock) { unlock(); return; }
