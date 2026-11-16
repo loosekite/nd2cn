@@ -572,9 +572,9 @@ body {
     function onSample(o, now) {
         var c = blank(), i, gap, br;
         for (i = 0; i < FIELDS.length; i++) { c[FIELDS[i]] = num(o[FIELDS[i]]); }
-        // brake is a 0/1 switch on this car; anything above 1 is taken as percent
+        // BCM GetBrkPedalDepressedStatus: 1=released, 0=depressed (inverted)
         br = c.brake;
-        if (br !== null) { c.brake = br <= 1 ? br * 100 : clamp(br, 0, 100); }
+        if (br !== null) { c.brake = br <= 1 ? (1 - br) * 100 : clamp(br, 0, 100); }
         if (c.throttle !== null) { c.throttle = clamp(c.throttle, 0, 100); }
         c.idle = o.idle === true;
         c.gear = o.gear;
