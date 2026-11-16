@@ -2,9 +2,11 @@
 # nd2cn — MX-5 ND2 Chinese Owner's Patch Installer (plugin based)
 # Entry point called by the USB trigger mechanism.
 #
-# Usage: sh install.sh [--check] [--no-reboot]
+# Usage: sh install.sh [--check] [--no-reboot] [--probe]
 #   --check      dry run: runs only plugin_check of every plugin, changes nothing
 #   --no-reboot  do not reboot at the end (for SSH use)
+#   --probe      also run the extended read-only probe (lib/probe.sh); an
+#                empty file named PROBE on the USB stick does the same
 #
 # Every plugins/*.sh on the USB stick is run, in filename order (00, 01, ...).
 # To leave a feature out, delete its file. Opt-in plugins live in
@@ -19,6 +21,8 @@
 
 REPO_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$REPO_DIR/lib/helpers.sh"
+# shellcheck source=lib/probe.sh
+[ -f "$REPO_DIR/lib/probe.sh" ] && . "$REPO_DIR/lib/probe.sh"
 ND2CN_SRC_DIR="$REPO_DIR"
 PLUGIN_DIR="$REPO_DIR/plugins"
 
@@ -28,8 +32,9 @@ for _arg in "$@"; do
     case "$_arg" in
         --check)     ND2CN_CHECK_MODE=1 ;;
         --no-reboot) ND2CN_REBOOT=0 ;;
+        --probe)     ND2CN_PROBE=1 ;;
         -h|--help)
-            sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *)
             echo "unknown option: $_arg" >&2
@@ -76,6 +81,7 @@ _nd2cn_copy_log_to_usb() {
     [ -f "$ND2CN_LOG" ] || return 0
     # Try writing directly first
     if cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null; then
+        command -v nd2cn_probe_copy_raw > /dev/null 2>&1 && nd2cn_probe_copy_raw "$REPO_DIR"
         return 0
     fi
     # USB might be mounted read-only by the media manager — try remounting rw
@@ -84,6 +90,7 @@ _nd2cn_copy_log_to_usb() {
         mount -o rw,remount "$_usb_dev" "$REPO_DIR" 2>/dev/null || \
         mount -o rw,remount "$REPO_DIR" 2>/dev/null
         cp "$ND2CN_LOG" "$REPO_DIR/nd2cn-install.log" 2>/dev/null
+        command -v nd2cn_probe_copy_raw > /dev/null 2>&1 && nd2cn_probe_copy_raw "$REPO_DIR"
     fi
 }
 
@@ -92,6 +99,11 @@ if ! nd2cn_check_firmware; then
     nd2cn_dialog_ok "nd2cn" "Unsupported firmware.\nOnly 74.00.324/324A is supported.\n\nNo changes were made."
     _nd2cn_copy_log_to_usb
     exit 1
+fi
+
+# ── Extended probe (opt-in, read-only; see lib/probe.sh) ──
+if command -v nd2cn_probe_wanted > /dev/null 2>&1 && nd2cn_probe_wanted "$REPO_DIR"; then
+    nd2cn_probe_extended
 fi
 
 # ── Discover + validate plugins ──
