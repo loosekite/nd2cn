@@ -175,10 +175,18 @@
 
     // ---- framework hooks (installed on first open) ----
 
+    // Only close on context changes that truly leave system/Applications.
+    // AtSpeed/NoSpeed speed-threshold events send a ctxtChg back to
+    // system/Applications (a list refresh); closing on those would kick
+    // the user out every time the car starts or stops.
     function shouldClose(msg) {
         var top;
         if (!msg) { return false; }
-        if (msg.msgType === "ctxtChg") { return true; }
+        if (msg.msgType === "ctxtChg") {
+            if (msg.ctxtId === "Idle") { return false; }
+            if (msg.uiaId === "system" && msg.ctxtId === "Applications") { return false; }
+            return true;
+        }
         if (msg.msgType === "focusStack") {
             top = msg.appIdList && msg.appIdList[0];
             return !!top && top.id !== "system";

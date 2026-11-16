@@ -570,6 +570,7 @@ v_oil=null; v_batt=null
 r_rpm=null; r_thr=null; r_steer=null; r_latg=null; r_long=null; r_cool=null; r_vss=null
 n_sig=0
 speed=null; gear=null; lever=null; brake=null; r_spd=null
+VDT_SEEN=0
 gps_fix=null; gps_lat=null; gps_lon=null; gps_hdg=null; gps_spd=null
 BCM_N=0
 
@@ -638,7 +639,11 @@ tick() {
     # Prefer VDT wheel speed (pushed signal, always current) over BCM
     # (polled, may return a stale cached value when stationary on some firmware)
     if [ "$v_vss" != "null" ]; then
+        VDT_SEEN=1
         speed=$v_vss
+    elif [ "$VDT_SEEN" = "0" ]; then
+        # VDT hasn't pushed yet (cold start); BCM may hold a stale cached value
+        speed=null
     elif [ "$r_spd" = "null" ]; then
         speed=null
     elif [ "$SPEED_DIV" = "1" ]; then

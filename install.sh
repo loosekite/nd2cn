@@ -290,42 +290,41 @@ fi
 _nd2cn_copy_log_to_usb
 sync
 
-# ── Plugin status dialog: per-plugin results on screen ──
+# ── Build per-plugin result list for the dialog ──
 _plist=""
+_problems=""
 while IFS= read -r _rline; do
     case "$_rline" in
-        *": ok")
-            _pname="${_rline%%: ok}"
-            _plist="$_plist\n[OK]  $_pname" ;;
+        *": ok"|*": check ok") ;;
         *": FAILED")
             _pname="${_rline%%: FAILED}"
-            _plist="$_plist\n[XX]  $_pname" ;;
+            _problems="$_problems\n[XX]  $_pname" ;;
         *": INVALID"*)
             _pname="${_rline%%: INVALID*}"
-            _plist="$_plist\n[--]  $_pname (invalid)" ;;
+            _problems="$_problems\n[--]  $_pname (invalid)" ;;
         *": skipped"*)
             _pname="${_rline%%: skipped*}"
-            _plist="$_plist\n[--]  $_pname (skip)" ;;
-        *": check ok")
-            _pname="${_rline%%: check ok}"
-            _plist="$_plist\n[OK]  $_pname" ;;
+            _problems="$_problems\n[--]  $_pname (skip)" ;;
     esac
 done < "$RESULTS"
-nd2cn_dialog_ok "nd2cn $ND2CN_VERSION" "$_ok OK, $_skipped skip, $_failed fail$_plist" 15
 
-# ── Completion dialog (never claims "complete" after a failed finalize) ──
+# ── Completion dialog (single dialog with plugin status) ──
 if [ "$_fin_rc" != "1" ]; then
-    _done_txt="Installation complete!\n\n$_ok OK, $_skipped skipped, $_failed failed."
+    _done_txt="$_ok OK, $_skipped skipped, $_failed failed."
+    [ -n "$_problems" ] && _done_txt="$_done_txt$_problems"
     [ "$_failed" != "0" ] && _done_txt="$_done_txt\nLog: nd2cn-install.log on USB"
     [ "$_fin_rc" = "2" ] && _done_txt="$_done_txt\n\n$(nd2cn_finalize_problem_text)"
     _done_txt="$_done_txt\n\n$_reboot_txt"
     if nd2cn_applied_has "01-chinese-language.sh"; then
         _done_txt="$_done_txt\n\nAfter reboot:\nSettings > Language > Simplified Chinese"
     fi
-    nd2cn_dialog_ok "nd2cn" "$_done_txt"
+    nd2cn_dialog_ok "nd2cn $ND2CN_VERSION" "$_done_txt" 15
 else
     nd2cn_log "ERROR: finalize failed — install is NOT reported as complete"
-    nd2cn_dialog_ok "nd2cn ERROR" "Installation NOT finalized.\n\n$_ok OK, $_skipped skipped, $_failed failed.\n$(nd2cn_finalize_problem_text)\nLog: nd2cn-install.log on USB\n\n$_reboot_txt"
+    _done_txt="Installation NOT finalized.\n\n$_ok OK, $_skipped skipped, $_failed failed."
+    [ -n "$_problems" ] && _done_txt="$_done_txt$_problems"
+    _done_txt="$_done_txt\n$(nd2cn_finalize_problem_text)\nLog: nd2cn-install.log on USB\n\n$_reboot_txt"
+    nd2cn_dialog_ok "nd2cn ERROR" "$_done_txt" 15
 fi
 
 # ── (log already copied above; this is a no-op safety net) ──
