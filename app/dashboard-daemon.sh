@@ -38,6 +38,8 @@
 #   polled with dbus-send:
 #     com.jci.vbs.bcm  GetCarSpeed(u) -> u,
 #                      GetBrkPedalDepressedStatus() -> y   (every 2nd tick, 10 Hz)
+#                          on/off switch, no pressure: 1 released, 2 depressed
+#                          (published raw; dashboard.html decodes it)
 #                      GetGearPos() -> y                   manual gearbox:
 #                          0 neutral, 1..8 forward, 14 reverse, 15 invalid
 #                      GetTransmChangeLeverPosition() -> y automatic gearbox:
@@ -115,8 +117,8 @@ DASH_IDLE=auto          # auto: sleep while nobody reads the file; off: always a
 DASH_LINGER=30          # seconds without a reader before going idle
 DASH_DBUS_TIMEOUT=250   # ms, per method call
 
-RPM_SCALE=2             # EngAout_N_Actl: 2 r/min per bit (Ford/Mazda CAN convention;
-RPM_OFFSET=0            #   check against the tachometer at idle, use 1 if it reads double)
+RPM_SCALE=2             # EngAout_N_Actl: 2 r/min per bit. Verified on the car (ND2 RF,
+RPM_OFFSET=0            #   74.00.324A, 2026-11-16): matches the tachometer, idle and revving
 THR_SCALE=0.1           # ApedPos_Pc_ActlArb: 0.1 % per bit
 THR_OFFSET=0
 # Steering and both accelerations are UNSIGNED on this firmware. libjcivdm.so
@@ -519,8 +521,8 @@ poll_cool() {
 detect_gearbox() {
     [ "$GBOX_FIXED" = "1" ] && return
     case "$lever" in
-        [2-6]) GBOX=at ;;
-        0|1)   [ -z "$GBOX" ] && case "$gear" in [1-8]|14) GBOX=mt ;; esac ;;
+        [2-6]) GBOX="at" ;;
+        0|1)   [ -z "$GBOX" ] && case "$gear" in [1-8]|14) GBOX="mt" ;; esac ;;
     esac
     return 0
 }

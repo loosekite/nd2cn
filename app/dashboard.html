@@ -19,9 +19,8 @@
     a value:
         STANDBY  standing still (3 s): coolant, huge, with its state in a word
                  (COLD / WARMING / NORMAL / HOT / OVERHEAT), gear, rpm number
-                 and bar, outside temperature; in the strip the session timer,
-                 the session's peak g, and green / grey / red tell-tales for
-                 oil pressure and charging
+                 and bar, outside temperature; in the strip the session timer
+                 and the session's peak g
         STREET   moving: speed, huge, gear, rpm bar; in the strip coolant
                  (number and colour bar) and outside temperature
         TRACK    above 0.55 g or 5500 r/min for 0.8 s; left again after 12 s
@@ -61,8 +60,8 @@
         rotate          / swipe left-right    next / previous view, locked
         tilt up                               TRACK view, now, locked
         tilt down       / tap the status cell back to automatic
-        press           / tap timer            start / pause the timer; double-tap
-                                              to reset while stopped
+        press           / tap timer            start / pause the timer
+        press twice     / double-tap timer     reset timer and peak g (within 0.5 s)
         Back            / tap  <              close
         tilt left-right / tap the status cell calibration panel on / off;
                           (while automatic)   it only opens standing still
@@ -168,15 +167,10 @@ body {
 .cv   { left: 0; top: 38px; height: 36px; font-size: 32px; line-height: 36px; white-space: nowrap; }
 #sesCell { left: 504px; width: 150px; }
 #stDot { left: 0; top: 16px; width: 12px; height: 12px; background: #55585a; }
-#stTxt { left: 22px; top: 10px; height: 24px; font-size: 18px; line-height: 24px; letter-spacing: 2px; white-space: nowrap; }
+#stTxt { left: 22px; top: 10px; height: 24px; font-size: 18px; line-height: 24px; letter-spacing: 2px; color: #ffffff; white-space: nowrap; }
 #stSub { left: 22px; top: 40px; height: 24px; font-size: 18px; line-height: 24px; color: #b4b7ba; white-space: nowrap; }
 .zh #stTxt, .zh #stSub { font-size: 20px; }
 #lockC { left: -2px; top: 41px; display: none; }
-/* oil pressure and charging, standby only: a green square says "fine"
-   without a word being read; grey = engine not running, red = fault */
-.ttD { left: 0; width: 12px; height: 12px; background: #55585a; }
-.ttT { left: 22px; height: 24px; font-size: 18px; line-height: 24px; color: #b4b7ba; white-space: nowrap; }
-.zh .ttT { font-size: 20px; }
 
 /* ── calibration panel (used parked, so it may be denser) ── */
 #raw  { left: 8px; top: 4px; width: 340px; height: 328px; display: none; background: #070a0a; }
@@ -308,11 +302,6 @@ body {
         <div class="cv"><span id="pkV" class="num s"></span><span class="unit s">g</span></div>
     </div>
 
-    <div class="cell vB" style="left:504px;width:150px">
-        <div id="ttOilD" class="ttD" style="top:16px"></div><div id="ttOilT" class="ttT" style="top:10px"></div>
-        <div id="ttBatD" class="ttD" style="top:46px"></div><div id="ttBatT" class="ttT" style="top:40px"></div>
-    </div>
-
     <div class="cell" id="stCell" style="left:664px;width:136px">
         <div id="stDot"></div>
         <div id="stTxt"></div>
@@ -403,11 +392,13 @@ body {
         warnBlinkMs:  5000,  // it blinks at 1 Hz this long, then stays steady
 
         resetArmMs:   3000,  // the second press that resets must come this soon
+        doubleMs:     500,   // commander double press (resets timer and peak g)
         fadeMs:       160    // dip to dark when the view changes
     };
 
     var C_CYAN = "#3cc8e8", C_AMBER = "#f89c1e", C_RED = "#ff2801", C_GREEN = "#3ecf6e", C_BLUE = "#3d8bff";
     var C_OFF = "#55585a", C_LABEL = "#b4b7ba";
+    var C_FLASH = "#0b3a45";                   // status cell, right after a view was picked
     var C_RED_LOW = "#8f1600";                 // the dark half of every red blink
     var TAU = Math.PI * 2;
     var DASH = "-";
@@ -449,22 +440,20 @@ body {
     };
     // The status cell is 114 px wide: at most 7 capitals or 5 hanzi per line.
     var TXT = ZH ? {
-        live: "实时", demo: "演示", waking: "唤醒中", stale: "无数据",
-        conn: "连接中", off: "离线", reset: "已重置", auto: "自动",
+        demo: "演示", waking: "唤醒中", stale: "无数据",
+        conn: "连接中", off: "离线", reset: "已重置", auto: "自动", manual: "手动",
         again: "再按一次重置", parked: "请先停车",
         modes: { standby: "待机", street: "公路", track: "赛道" },
         oil: "油压低", batt: "充电故障", temp: "水温",
-        ttOil: "机油压力", ttBat: "充电系统",
         cool: ["冷车", "暖机中", "正常", "偏高", "过热"],
         rows: ["转速", "油门", "转向", "横向 G", "纵向 G", "水温", "车速 VSS", "车速 BCM",
                "挡位 MT", "挡杆 AT", "制动", "GPS 车速", "GPS 航向", "油压 / 充电", "序号 / 频率", "信号 / 延迟"]
     } : {
-        live: "LIVE", demo: "DEMO", waking: "WAKING", stale: "NO DATA",
-        conn: "WAIT", off: "OFFLINE", reset: "RESET DONE", auto: "AUTO",
+        demo: "DEMO", waking: "WAKING", stale: "NO DATA",
+        conn: "WAIT", off: "OFFLINE", reset: "RESET DONE", auto: "AUTO", manual: "MANUAL",
         again: "AGAIN TO RESET", parked: "PARKED ONLY",
         modes: { standby: "STANDBY", street: "STREET", track: "TRACK" },
         oil: "OIL", batt: "BATT", temp: "TEMP",
-        ttOil: "OIL PRESS", ttBat: "CHARGING",
         cool: ["COLD", "WARMING", "NORMAL", "HOT", "OVERHEAT"],
         rows: ["RPM", "THROTTLE", "STEERING", "LAT G", "LON G", "COOLANT", "SPEED VSS", "SPEED BCM",
                "GEAR MT", "LEVER AT", "BRAKE", "GPS SPEED", "GPS HEADING", "OIL / CHARGE", "SEQ / RATE", "SIGNALS / AGE"]
@@ -572,9 +561,11 @@ body {
     function onSample(o, now) {
         var c = blank(), i, gap, br;
         for (i = 0; i < FIELDS.length; i++) { c[FIELDS[i]] = num(o[FIELDS[i]]); }
-        // BCM GetBrkPedalDepressedStatus: 1=released, 0=depressed (inverted)
+        // BCM GetBrkPedalDepressedStatus is an on/off switch, not a pressure
+        // (seen on the car): 1 = released, 2 = depressed. Anything else
+        // (0 before the BCM has reported, out-of-range values) is no data.
         br = c.brake;
-        if (br !== null) { c.brake = br <= 1 ? (1 - br) * 100 : clamp(br, 0, 100); }
+        c.brake = br === 2 ? 100 : (br === 1 ? 0 : null);
         if (c.throttle !== null) { c.throttle = clamp(c.throttle, 0, 100); }
         c.idle = o.idle === true;
         c.gear = o.gear;
@@ -582,8 +573,6 @@ body {
         c.gearbox = o.gearbox;
         c.oil = o.oil_warn === 1 || o.oil_warn === true;
         c.batt = o.batt_warn === 1 || o.batt_warn === true;
-        c.oilOk = o.oil_warn === 0 || o.oil_warn === false;       // known to be fine, not just unknown
-        c.battOk = o.batt_warn === 0 || o.batt_warn === false;
 
         gap = now - S.tCur;
         if (S.cur && gap > 15 && gap < 1000) { S.dt += (gap - S.dt) * 0.25; }
@@ -666,7 +655,7 @@ body {
         o.rpm = Math.round(rpm);
         o.gear = g; o.lever = 1; o.gearbox = "mt";
         o.throttle = lon > 0 ? Math.round(clamp(lon * 190, 0, 100) * 10) / 10 : 0;
-        o.brake = lon < -0.18 ? 1 : 0;
+        o.brake = lon < -0.18 ? 2 : 1;                         // BCM encoding: 1 released, 2 depressed
         o.steering = Math.round(lat * 420) / 10;
         o.lat_g = Math.round(lat * 1000) / 1000;
         o.lon_g = Math.round(lon * 1000) / 1000;
@@ -722,15 +711,29 @@ body {
             timer.state = "paused";
         }
     }
-    function timerReset() {
-        if (timer.state !== "stopped") {
-            timer.state = "stopped"; timer.elapsed = 0; timer.ref = 0;
-            toast(TXT.reset, false, 1400);
+    // Commander press / tap on the timer: start or pause it. A second press
+    // within CFG.doubleMs resets the session (timer and peak g); whatever the
+    // first press of the pair did to the timer no longer matters then.
+    var lastSel = 0;
+    function selectPress() {
+        var now = Date.now();
+        if (lastSel && now >= lastSel && now - lastSel < CFG.doubleMs) {
+            lastSel = 0; armed = 0;
+            resetSession();
+            return;
         }
+        lastSel = now;
+        timerToggle();
     }
     function timerMs() {
         if (timer.state === "running") { return timer.elapsed + (Date.now() - timer.ref); }
         return timer.elapsed;
+    }
+    // mm:ss.cc; past an hour h:mm:ss, the cell has no room for both
+    function timerText(ms) {
+        var cs = Math.max(0, Math.floor(ms / 10)), s = Math.floor(cs / 100), h = Math.floor(s / 3600);
+        if (h > 0) { return h + ":" + pad2(Math.floor(s % 3600 / 60)) + ":" + pad2(s % 60); }
+        return pad2(Math.floor(s / 60)) + ":" + pad2(s % 60) + "." + pad2(cs % 100);
     }
     function saveState() {
         var s;
@@ -1103,7 +1106,7 @@ body {
         M.lock = true;
         setMode(MODES[i]);
         showView();
-        toast(TXT.modes[M.mode]);
+        flashStatus();
     }
     // commander tilt up: TRACK, now, from anywhere
     function jumpTo(m) {
@@ -1111,7 +1114,7 @@ body {
         M.lock = true;
         setMode(m);
         showView();
-        toast(TXT.modes[M.mode]);
+        flashStatus();
     }
     // commander tilt down / tap on the status cell while locked
     function unlock() {
@@ -1122,7 +1125,7 @@ body {
         // comes up at once instead of after the usual hold times.
         if (live && !stale && S.cur) { setMode(wantedMode(S.cur)); }
         showView();
-        toast(TXT.auto);
+        flashStatus();
     }
     // commander press / tap: reset peak g and the timer. One stray press or
     // a hand brushing the screen must not wipe a session, so the first press
@@ -1153,10 +1156,9 @@ body {
         cool: $("coolV"), coolS: $("coolS"),
         gTot: $("gTotV"), gMax: $("gMax"), pk: $("pkV"),
         gps: $("gpsV"), st: $("stV"), ses: $("sesV"),
-        dot: $("stDot"), stTxt: $("stTxt"), stSub: $("stSub"),
+        dot: $("stDot"), stTxt: $("stTxt"), stSub: $("stSub"), stCell: $("stCell"),
         amb: $("ambV"), ambCell: $("ambCell"),
         alerts: $("alerts"), alTop: $("alTop"),
-        ttOilD: $("ttOilD"), ttBatD: $("ttBatD"),
         lock: $("lockC"), raw: $("raw"), rawRows: $("rawRows"), toast: $("toast")
     };
     el.spd._b = "vT vS";                       // view classes survive colour changes
@@ -1285,11 +1287,8 @@ body {
     }
 
     function updateSlow(now, state) {
-        var ms = timerMs(), s = Math.max(0, Math.floor(ms / 1000)), t10 = Math.floor(ms / 100) % 10;
-        var h, v, c = live ? S.cur : null, run, sesTxt, sesCls;
-        h = Math.floor(s / 3600);
-        sesTxt = (h > 0 ? h + ":" : "") + pad2(Math.floor(s % 3600 / 60)) + ":" + pad2(s % 60) + "." + t10;
-        setDigits(el.ses, sesTxt);
+        var v, c = live ? S.cur : null, sesCls;
+        setDigits(el.ses, timerText(timerMs()));
         sesCls = timer.state === "running" ? "num s cWhite" :
                  (timer.state === "paused" ? (Math.floor(now / 500) % 2 ? "num s cAmber" : "num s cDim") : "num s cDim");
         setClass(el.ses, sesCls);
@@ -1298,18 +1297,7 @@ body {
         setDigits(el.pk, PK.tot > 0 ? PK.tot.toFixed(2) : "-.--");
         setClass(el.pk, PK.tot > 0 ? "num s cAmber" : "num s cDim");
 
-        // status cell: data link on the first line, the view (and its lock) on the second
-        if (state === "live") {
-            status(C_CYAN, OPT.demo ? TXT.demo : TXT.live, "#ffffff");
-        } else if (state === "stale") {
-            status(C_AMBER, TXT.stale, C_AMBER);
-        } else if (state === "idle") {
-            status(C_LABEL, TXT.waking, "#c8c8c8");
-        } else if (state === "wait") {
-            status(C_LABEL, TXT.conn, "#c8c8c8");
-        } else {
-            status(C_AMBER, TXT.off, C_AMBER);
-        }
+        linkState = state;
         showView();
 
         // outside temperature: only when the car reports one
@@ -1320,31 +1308,42 @@ body {
         }
         if (v !== null) { setDigits(el.amb, fixed(Math.round(v), 0, false)); }
 
-        // tell-tales (STANDBY): green only when the engine runs and the car
-        // says "no warning"; red on a warning; grey when there is no telling
-        run = !!c && c.rpm !== null && c.rpm >= CFG.engineRpm;
-        setBg(el.ttOilD, !c ? C_OFF : (c.oil ? (c.rpm === null || run ? C_RED : C_OFF) : (run && c.oilOk ? C_GREEN : C_OFF)));
-        setBg(el.ttBatD, !c ? C_OFF : (c.batt ? (c.rpm === null || run ? C_RED : C_OFF) : (run && c.battOk ? C_GREEN : C_OFF)));
-
         if (rawOn) { updateRaw(now); }
         saveState();
     }
-    // second line of the status cell: the view, amber with a padlock while locked
+    // Status cell. Line 1: the view. Line 2: who picks it, 自动 (speed, g and
+    // rpm decide) or 手动 with a padlock (picked with the commander; tilt
+    // down goes back to automatic). Without live data line 2 says so
+    // instead, and an amber dot lights up beside the view. Live data needs
+    // no word: it is what the gauges normally show.
+    var linkState = "wait";
     function showView() {
-        setText(el.stSub, TXT.modes[M.mode]);
-        if (el.lock._on !== M.lock) {
-            el.lock._on = M.lock;
-            el.lock.style.display = M.lock ? "block" : "none";
-            el.stSub.style.color = M.lock ? C_AMBER : C_LABEL;
-        }
+        var s = linkState, sub, col, lockOn = false;
+        if (s === "live") {
+            if (OPT.demo) { sub = TXT.demo; col = C_CYAN; }
+            else if (M.lock) { sub = TXT.manual; col = C_AMBER; lockOn = true; }
+            else { sub = TXT.auto; col = C_LABEL; }
+        } else if (s === "stale") { sub = TXT.stale; col = C_AMBER; }
+        else if (s === "idle") { sub = TXT.waking; col = C_LABEL; }
+        else if (s === "wait") { sub = TXT.conn; col = C_LABEL; }
+        else { sub = TXT.off; col = C_AMBER; }
+        setText(el.stTxt, TXT.modes[M.mode] || "");
+        setText(el.stSub, sub);
+        if (el.stSub._col !== col) { el.stSub._col = col; el.stSub.style.color = col; }
+        showIf(el.lock, lockOn, "block");
+        showIf(el.dot, s !== "live", "block");
+        if (s !== "live") { setBg(el.dot, col); }
+    }
+    // A view picked by hand is confirmed where it is named: the status cell
+    // lights up for a moment. A banner in the strip would cover numbers.
+    var flashTimer = null;
+    function flashStatus() {
+        setBg(el.stCell, C_FLASH);
+        if (flashTimer) { clearTimeout(flashTimer); }
+        flashTimer = setTimeout(function () { setBg(el.stCell, ""); flashTimer = null; }, 1200);
     }
     function showIf(elm, on, how) {
         if (elm._on !== on) { elm._on = on; elm.style.display = on ? how : "none"; }
-    }
-    function status(dot, txt, color) {
-        setBg(el.dot, dot);
-        if (el.stTxt._col !== color) { el.stTxt._col = color; el.stTxt.style.color = color; }
-        setText(el.stTxt, txt);
     }
 
     var toastTimer = null;
@@ -1497,6 +1496,9 @@ body {
         if (now - F.fast >= 50 || now < F.fast) { F.fast = now; updateFast(); updateAlerts(now); }
         if (now - F.med >= 200 || now < F.med) { F.med = now; updateMed(); }
         if (now - F.slow >= 250 || now < F.slow) { F.slow = now; updateSlow(now, state); }
+        // a running timer ticks every frame (hundredths); setDigits only
+        // touches the characters that changed
+        else if (timer.state === "running") { setDigits(el.ses, timerText(timerMs())); }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -1505,7 +1507,7 @@ body {
     // Every input has one meaning, whatever the state, so the commander can
     // be worked without looking at the screen.
     function onKey(k) {
-        if (k === "select") { timerToggle(); }
+        if (k === "select") { selectPress(); }
         else if (k === "cw") { cycleMode(1); }
         else if (k === "ccw") { cycleMode(-1); }
         else if (k === "up") { jumpTo("track"); }
@@ -1526,12 +1528,12 @@ body {
     //   tap status cell      locked: back to automatic      = commander tilt down
     //                        automatic: calibration         = commander tilt left / right
     //   tap the panel        close it
-    //   tap anywhere else    reset peaks (asks first)       = commander press
+    //   tap timer            start / pause, twice: reset   = commander press
+    //   tap anywhere else    reset timer and peaks (asks first)
     (function () {
         var downX = null;
-        var sesLastTap = 0;
         function tap(n) {
-            var id, tapNow;
+            var id;
             while (n && n !== app) {
                 id = n.id;
                 if (id === "back") {
@@ -1539,17 +1541,7 @@ body {
                     else { try { W.history.back(); } catch (err) {} }
                     return;
                 }
-                if (id === "sesCell" || id === "sesV") {
-                    tapNow = Date.now();
-                    if (timer.state === "stopped" && timer.elapsed > 0) {
-                        timerReset();
-                    } else if (tapNow - sesLastTap < 400) {
-                        timerReset(); sesLastTap = 0;
-                    } else {
-                        timerToggle(); sesLastTap = tapNow;
-                    }
-                    return;
-                }
+                if (id === "sesCell" || id === "sesV") { selectPress(); return; }
                 if (id === "stCell" && M.lock) { unlock(); return; }
                 if (id === "stCell" || id === "raw") { toggleRaw(); return; }
                 n = n.parentNode;
@@ -1578,8 +1570,6 @@ body {
     if (OPT.view === "standby" || OPT.view === "street" || OPT.view === "track") { M.lock = true; setMode(OPT.view); }
     AL.oil.el.textContent = TXT.oil;
     AL.bat.el.textContent = TXT.batt;
-    $("ttOilT").textContent = TXT.ttOil;
-    $("ttBatT").textContent = TXT.ttBat;
     drawBack();
     drawLock();
     if (OPT.raw) { toggleRaw(true); }
