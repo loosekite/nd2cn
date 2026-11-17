@@ -24,6 +24,9 @@ These were opt-in in nd2cn v1 (flag files) and stay opt-in:
   21-track-dashboard.sh   [experimental]  Track Dash app (installs app/ into /data/nd2cn/app/)
                                            also sets "Allow File XMLHttpRequest=1"
                                            in opera.ini [User Prefs] (file:// XHR)
+  22-gps-fast.sh          [experimental]  GPS position to CarPlay up to 10x per second
+                                           (new board only; settings in
+                                           resources/gps-fast.conf, see the file header)
 
 Plugins 11, 18, 19 and 21 need 00-boot-hook.sh (it is in plugins/ by default).
 
