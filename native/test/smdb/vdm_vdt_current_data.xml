@@ -1,0 +1,15 @@
+<?xml version="1.0" ?>
+<vdm_vdt_current_data>
+    <!-- A few entries in the style of /jci/smdb/vdm_vdt_current_data.xml, for
+         the tests only. The real schema has 279 entries. -->
+    <LatitudeByGPS type="int" value="0" />
+    <FuelGaugePosition type="int" value="0" />
+    <VehicleSpeed type="int" value="0" />
+    <EngineSpeed type="int" value="0" />
+    <AccelPedalPosition type="int" value="0" />
+    <SteeringWheel type="int" value="32766" />
+    <YawRate type="int" value="4094" />
+    <EngClnt_Te_Actl type="int" value="0" />
+    <BrakePressure type="int" value="152" />
+    <DR_BrakeStatic type="binary" size="120" value="0" />
+</vdm_vdt_current_data>

@@ -11,6 +11,16 @@
 #              boot.d, prints nothing, never starts twice)
 #     run      run in the foreground (debugging over SSH)
 #
+# THIS SCRIPT IS THE FALLBACK. Next to it lives nd2cn-dashd, a native program
+# (source: native/dashd.c) that does the same job without launching a
+# process per question: it forwards every frame the car sends (10 a second)
+# where this script reaches 5 to 6. "start" runs the native program if it
+# passes its own self-test on this unit, and the shell loop below otherwise.
+# DASH_NATIVE=off in dashboard.conf forces the shell loop. Both write the
+# same JSON (the native one adds "wheels", "src":"native" and "t", the time
+# stamp the page uses to move its bars and numbers evenly) and use the
+# same pid file, so stop / restart / status work for either.
+#
 # POSIX sh, written for BusyBox 1.19.2 ash. Needs dbus-send, dbus-monitor,
 # awk, mkfifo, usleep, stat, touch and (for coolant) /jci/smdb/smdb-read
 # (all present on firmware 74.00.324A).
@@ -116,6 +126,7 @@ DASH_GEARBOX=auto       # auto | at | mt. auto: decided from what the car report
 DASH_IDLE=auto          # auto: sleep while nobody reads the file; off: always active
 DASH_LINGER=30          # seconds without a reader before going idle
 DASH_DBUS_TIMEOUT=250   # ms, per method call
+DASH_NATIVE=auto        # auto: use nd2cn-dashd if it can run here; off: always this script
 
 RPM_SCALE=2             # EngAout_N_Actl: 2 r/min per bit. Verified on the car (ND2 RF,
 RPM_OFFSET=0            #   74.00.324A, 2026-11-16): matches the tachometer, idle and revving
@@ -132,11 +143,18 @@ STEER_OFFSET=-1600      #   ... centre at raw 16000. The firmware only proves "u
 STEER_SIGNED=0          #   0..32765"; 16000 is the value Mazda uses on the CAN bus of
                         #   this generation (opendbc mazda_2017). Check on the car: wheels
                         #   straight must read about 0. Negative scale flips left / right.
-LATG_SCALE=0.001        # Lateral_Acceleration: 0.001 g per bit, 0 g = raw 4000
-LATG_OFFSET=-4.0        #   (flip the sign of LATG_SCALE, and make LATG_OFFSET +4.0,
-LATG_SIGNED=0           #   if the dot moves the wrong way)
-LONG_SCALE=0.001        # VehLong_A_Actl: 0.001 g per bit, 0 g = raw 4000;
-LONG_OFFSET=-4.0        #   positive = accelerating
+# Both accelerations: 0.01 m/s2 per bit, 0 = raw 4000. That is the definition
+# of the same-named signals (VehLong_A_Actl, VehLat_A_Actl) in Ford's public
+# CAN database (opendbc, ford_lincoln_base_pt.dbc: factor 0.01, offset -40
+# m/s2), whose naming this Mazda generation shares; the engine speed scale
+# from the same file (2 r/min per bit) was confirmed on the car. In g:
+# 0.01 / 9.80665 = 0.001019716 per bit, and 4000 bits = 4.078864 g.
+# (Until 2026-11-17 this was 0.001 g per bit: readings were 2 % low.)
+LATG_SCALE=0.001019716  # Lateral_Acceleration (flip the sign of LATG_SCALE, and make
+LATG_OFFSET=-4.078864   #   LATG_OFFSET +4.078864, if the dot moves the wrong way)
+LATG_SIGNED=0
+LONG_SCALE=0.001019716  # VehLong_A_Actl; positive = accelerating
+LONG_OFFSET=-4.078864
 LONG_SIGNED=0
 COOL_SCALE=1            # SMDB EngClnt_Te_Actl (one byte): 1 degree C per bit ...
 COOL_OFFSET=-40         #   ... with the usual CAN offset of -40 (use 0 if it reads 40 too low)
@@ -180,23 +198,105 @@ esac
 # ──────────────────────────────────────────────────────────────
 daemon_pid() {
     [ -r "$PIDFILE" ] || return 1
-    read -r _dp < "$PIDFILE" 2>/dev/null || return 1
+    read -r _dp 2>/dev/null < "$PIDFILE" || return 1
     case "$_dp" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$_dp" 2>/dev/null || return 1
-    # guard against a recycled pid
-    grep -q "${0##*/}" "/proc/$_dp/cmdline" 2>/dev/null || return 1
+    # guard against a recycled pid: it must be this script or the native daemon
+    grep -q -e "${0##*/}" -e "$NATIVE_NAME" "/proc/$_dp/cmdline" 2>/dev/null || return 1
     echo "$_dp"
 }
 
-cmd_start() {
-    daemon_pid > /dev/null && return 0
-    mkdir -p "$RUN_DIR" || return 1
-    _self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
-    if command -v setsid > /dev/null 2>&1; then
-        setsid sh "$_self" run < /dev/null > /dev/null 2>&1 &
-    else
-        sh "$_self" run < /dev/null > /dev/null 2>&1 &
+# ──────────────────────────────────────────────────────────────
+# The native daemon
+# ──────────────────────────────────────────────────────────────
+NATIVE_NAME=nd2cn-dashd
+NATIVE_BIN=""
+
+# native_try FILE — true if FILE is the native daemon and runs on this unit
+native_try() {
+    [ -f "$1" ] && [ -x "$1" ] || return 1
+    # the braces: a binary that crashes must not put the shell's "Bus error" on the console
+    { _nt=$("$1" selftest 2>/dev/null); } 2>/dev/null || return 1
+    case "$_nt" in "nd2cn-dashd OK"*) NATIVE_BIN=$1; return 0 ;; esac
+    return 1
+}
+
+# Find a copy that can be executed: the installed one, or (should /data not
+# allow execution) a copy in the run directory, which is the only place this
+# script writes to.
+native_find() {
+    [ "$DASH_NATIVE" = "off" ] && return 1
+    _nf="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$NATIVE_NAME"
+    [ -f "$_nf" ] || return 1
+    native_try "$_nf" && return 0
+    # by rename: a copy that is still running cannot be written over. The
+    # temporary name is this caller's own, so that two starts at once do not
+    # write into the same file.
+    # It is tested under that name first: a copy that cannot run either (/tmp
+    # not executable as well) is not left behind.
+    _nt_tmp="$RUN_DIR/.$NATIVE_NAME.$$.tmp"
+    if cp "$_nf" "$_nt_tmp" 2>/dev/null && chmod 755 "$_nt_tmp" 2>/dev/null && \
+       native_try "$_nt_tmp" && mv -f "$_nt_tmp" "$RUN_DIR/$NATIVE_NAME" 2>/dev/null; then
+        NATIVE_BIN="$RUN_DIR/$NATIVE_NAME"
+        return 0
     fi
+    rm -f "$_nt_tmp"
+    return 1
+}
+
+# nap: wait a tenth of a second; without usleep, a whole one. NAP is how many
+# tenths that was, so that the loops below count time, not rounds.
+if command -v usleep > /dev/null 2>&1; then
+    nap() { usleep 100000; }
+    NAP=1
+else
+    nap() { sleep 1; }
+    NAP=10
+fi
+
+# Who runs is decided by the native daemon itself, not here. It holds a
+# kernel lock on .daemon.lock in the run directory for as long as it lives
+# (the kernel drops it when the process ends, so nothing is ever left
+# behind). A second one waits up to 4 s for that lock: it takes over if the
+# first one is on its way out (a stop or restart running at the same time),
+# and otherwise leaves quietly. So "start" may launch it as often as it is
+# called, from as many places at once as it likes: exactly one keeps running.
+# Checking for a running daemon here first, and launching only if there is
+# none, cannot work: between the check and the launch another start or a
+# stop can come in.
+# The shell daemon below is only the fallback, for a unit where the native
+# one does not pass its self-test; it keeps the simple pid file check.
+cmd_start() {
+    mkdir -p "$RUN_DIR" || return 1
+    # a shell daemon that runs already (DASH_NATIVE=off until now): leave it be.
+    # (Asked positively: a native daemon that has just ended is not one.)
+    if _sp=$(daemon_pid) && grep -q "${0##*/}" "/proc/$_sp/cmdline" 2>/dev/null; then
+        return 0
+    fi
+    if native_find; then
+        # it reads the same dashboard.conf and the same DASH_* overrides
+        if command -v setsid > /dev/null 2>&1; then
+            setsid "$NATIVE_BIN" run < /dev/null > /dev/null 2>&1 &
+        else
+            "$NATIVE_BIN" run < /dev/null > /dev/null 2>&1 &
+        fi
+    else
+        daemon_pid > /dev/null && return 0
+        _self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+        if command -v setsid > /dev/null 2>&1; then
+            setsid sh "$_self" run < /dev/null > /dev/null 2>&1 &
+        else
+            sh "$_self" run < /dev/null > /dev/null 2>&1 &
+        fi
+    fi
+    # "started" means: a daemon's pid file is there, so that a status or stop
+    # right after this sees it. (6 s at most: a native daemon that takes over
+    # from one being stopped may wait 4 s for it.)
+    _n=0
+    while ! daemon_pid > /dev/null && [ "$_n" -lt 60 ]; do
+        nap
+        _n=$((_n + NAP))
+    done
     return 0
 }
 
@@ -204,29 +304,39 @@ cmd_start() {
 # is the case when the daemon was started through setsid (cmd_start) or as a
 # job of an interactive shell.
 is_group_leader() {
-    read -r _ _ _ _ _pg _ < "/proc/$1/stat" 2>/dev/null || return 1
+    read -r _ _ _ _ _pg _ 2>/dev/null < "/proc/$1/stat" || return 1
     [ "$_pg" = "$1" ]
 }
 
 # Print the pids whose parent is PID (builtins only, no process is started)
+# (In these reads "2>/dev/null" comes before "<": redirections are made from
+# left to right, and the message about a process that has just gone would
+# otherwise still reach the terminal.)
 children_of() {
     for _st in /proc/[0-9]*/stat; do
-        read -r _cp _ _ _cpp _ < "$_st" 2>/dev/null || continue
+        read -r _cp _ _ _cpp _ 2>/dev/null < "$_st" || continue
         [ "$_cpp" = "$1" ] && echo "$_cp"
     done
 }
 
+# The copy of the native daemon in the run directory (made when /data does
+# not allow execution) goes with the daemon, unless one runs again by now: a
+# start that overlapped this stop may have taken over.
+drop_copy() {
+    daemon_pid > /dev/null || rm -f "$RUN_DIR/$NATIVE_NAME"
+}
+
 cmd_stop() {
-    _sp=$(daemon_pid) || return 0
+    _sp=$(daemon_pid) || { drop_copy; return 0; }
     _grp=""
     is_group_leader "$_sp" && _grp=$_sp
     kill "$_sp" 2>/dev/null             # TERM: cleanup() stops dbus-monitor and awk, removes the files
     _n=0
     while kill -0 "$_sp" 2>/dev/null && [ "$_n" -lt 30 ]; do
-        usleep 100000 2>/dev/null || sleep 1
-        _n=$((_n + 1))
+        nap
+        _n=$((_n + NAP))
     done
-    kill -0 "$_sp" 2>/dev/null || return 0
+    kill -0 "$_sp" 2>/dev/null || { drop_copy; return 0; }
 
     # It does not react. SIGKILL cannot be trapped, so nothing would stop
     # dbus-monitor and awk: they would live on, and so would the monitor's
@@ -243,13 +353,26 @@ cmd_stop() {
     for _k in $_kids; do
         kill -9 "$_k" 2>/dev/null
     done
-    rm -f "$OUT" "$TMP" "$FRAG" "$FIFO" "$PIDFILE"
+    # Its files, which it could not remove itself: only if the pid file still
+    # names it. A native daemon started meanwhile may have taken over and be
+    # writing them. (Left behind, a stale pid file is harmless: daemon_pid
+    # checks the process.)
+    _pf=""
+    read -r _pf 2>/dev/null < "$PIDFILE"
+    if [ "$_pf" = "$_sp" ]; then
+        rm -f "$OUT" "$TMP" "$FRAG" "$FIFO" "$PIDFILE"
+    fi
+    drop_copy
     return 0
 }
 
 cmd_status() {
     if _sp=$(daemon_pid); then
-        echo "running (pid $_sp)"
+        if grep -q "$NATIVE_NAME" "/proc/$_sp/cmdline" 2>/dev/null; then
+            echo "running (pid $_sp, native)"
+        else
+            echo "running (pid $_sp, shell)"
+        fi
         [ -r "$OUT" ] && cat "$OUT"
         return 0
     fi
@@ -486,9 +609,37 @@ is_int() {
     return 0
 }
 
+# smdb-read creates the database if it does not exist yet (the vendor library
+# opens it with O_CREAT), and it would do so as root, while the services that
+# own it run as another user. So it is only run once the object is there and
+# has data: in /dev/shm or, as glibc's shm_open() does when that is no tmpfs,
+# in another tmpfs. The owner makes the semaphore last, after filling the
+# object, so in the first half minute after boot the semaphore must be there
+# too (glibc keeps it next to the object as "sem.smdb_<name>"; that name is
+# inferred, hence only then). Should the object be nowhere this script looks,
+# the tool is allowed after two minutes of uptime, by which time the services
+# have long created it.
+smdb_there() {      # DIR
+    [ -s "$1/smdb_vdm_vdt_current_data" ] || return 1
+    [ "$_ss_s" -ge 30 ] || [ -e "$1/sem.smdb_vdm_vdt_current_data" ]
+}
+smdb_safe() {
+    read -r _ss_up _ < /proc/uptime 2>/dev/null || _ss_up=999
+    _ss_s=${_ss_up%%.*}
+    case "$_ss_s" in ''|*[!0-9]*) _ss_s=999 ;; esac
+    smdb_there /dev/shm && return 0
+    while read -r _ _ss_mp _ss_ft _; do
+        case "$_ss_ft" in
+            tmpfs|shm) smdb_there "$_ss_mp" && return 0 ;;
+        esac
+    done < /proc/mounts 2>/dev/null
+    [ "$_ss_s" -ge 120 ]
+}
+
 poll_cool() {
     v_cool=null; r_cool=null
     [ -n "$SMDB_READ" ] || return
+    [ -n "$DASH_SMDB_READ" ] || smdb_safe || return
     _out=$(LD_LIBRARY_PATH="/jci/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         "$SMDB_READ" -n vdm_vdt_current_data -e EngClnt_Te_Actl 2>/dev/null 3>&-) || return
     # the value is the last word of the output
@@ -517,7 +668,9 @@ poll_cool() {
 #   lever 2..6           -> automatic (a manual never gets there)
 #   a gear, lever 0 or 1 -> manual
 # Until one of the two has been seen the answer is open ("gearbox":null) and
-# the page shows the lever. DASH_GEARBOX=at|mt in the config settles it.
+# the page decides by the same rule for itself: lever 2..6 reads as an
+# automatic, anything else as a manual (gearText() in dashboard.html).
+# DASH_GEARBOX=at|mt in the config settles it.
 detect_gearbox() {
     [ "$GBOX_FIXED" = "1" ] && return
     case "$lever" in
@@ -535,7 +688,7 @@ STAMP0=""
 ARMED=0
 
 atime_selftest() {
-    _f="$RUN_DIR/.dashboard.atime"
+    _f="$RUN_DIR/.dashboard.atime.$$"
     echo x > "$_f" 2>/dev/null || return 1
     touch -t "$STAMP_OLD" "$_f" 2>/dev/null || { rm -f "$_f"; return 1; }
     STAMP0=$(stat -c %X "$_f" 2>/dev/null)

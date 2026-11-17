@@ -1,12 +1,17 @@
 #!/bin/sh
 # nd2cn plugin: Track Dash app (live vehicle data dashboard)
-# Installs the three files of app/ on the USB stick into /data/nd2cn/app/:
+# Installs the files of app/ on the USB stick into /data/nd2cn/app/:
 #   dashboard-loader.js   GUI hook: adds a "Track Dash" entry to the
 #                         Applications list and shows dashboard.html in an
 #                         overlay. It looks for dashboard.html next to itself.
 #   dashboard.html        the dashboard page; reads /tmp/nd2cn/dashboard.json
-#   dashboard-daemon.sh   collects vehicle data over D-Bus and writes that
-#                         JSON file (tmpfs only, on demand — see the file)
+#   nd2cn-dashd           native data daemon (static ARM binary, source in
+#                         native/dashd.c): reads the vehicle data from D-Bus
+#                         and writes that JSON file, 10 times a second
+#                         (tmpfs only, on demand). Optional: without it, or
+#                         if it cannot run on this unit, the script is used.
+#   dashboard-daemon.sh   starts nd2cn-dashd; also the fallback that does the
+#                         same job in shell (5 to 6 times a second)
 # and wires them up without touching the rootfs:
 #   - the loader is registered with the nd2cn GuiConfig hook loader of plugin
 #     00-boot-hook (a utility.loadScript("file://...") line between its
@@ -33,7 +38,7 @@
 #
 # Idempotency: each file is rewritten only if its content differs; the GUI
 # registration and the boot.d script are added only if missing/changed. A
-# running daemon is restarted only when its script changed.
+# running daemon is restarted only when its script or nd2cn-dashd changed.
 # Removal unregisters the loader, stops the daemon and deletes the boot.d
 # script and /data/nd2cn/app/. A dashboard.conf made by the user is kept.
 PLUGIN_NAME="track-dashboard"
@@ -42,6 +47,7 @@ PLUGIN_RISK="experimental"
 # requires: 00-boot-hook
 
 P21_FILES="dashboard.html dashboard-loader.js dashboard-daemon.sh"
+P21_NATIVE="nd2cn-dashd"                # optional, see above
 P21_SRC_DIR="$ND2CN_SRC_DIR/app"
 P21_APP_DIR="$ND2CN_DIR/app"
 # Paths as seen on the car (never prefixed with FIRMWARE_ROOT): these are
@@ -80,7 +86,43 @@ plugin_check() {
         nd2cn_log "FAIL: $P21_OPERA_INI not found (needed to allow file:// XHR)"
         return 1
     fi
-    nd2cn_log "OK: app files present (GUI hook is registered by 00-boot-hook's loader)"
+    if [ -s "$P21_SRC_DIR/$P21_NATIVE" ]; then
+        nd2cn_log "OK: app files present, with the native data daemon (GUI hook is registered by 00-boot-hook's loader)"
+    else
+        nd2cn_log "OK: app files present; no app/$P21_NATIVE on the USB drive, the shell data daemon will be used"
+    fi
+    return 0
+}
+
+# Install the native daemon and ask it whether it can run on this unit. It is
+# never a reason to fail: dashboard-daemon.sh falls back to its shell loop.
+_p21_install_native() {
+    if [ ! -s "$P21_SRC_DIR/$P21_NATIVE" ]; then
+        if [ -f "$P21_APP_DIR/$P21_NATIVE" ]; then
+            rm -f "$P21_APP_DIR/$P21_NATIVE"
+            _p21_daemon_changed=1
+            nd2cn_log "native data daemon removed (not on the USB drive any more)"
+        fi
+        return 0
+    fi
+    if ! nd2cn_install_file "$P21_APP_DIR/$P21_NATIVE" 755 < "$P21_SRC_DIR/$P21_NATIVE" || \
+       ! cmp -s "$P21_SRC_DIR/$P21_NATIVE" "$P21_APP_DIR/$P21_NATIVE"; then
+        # a daemon that runs from the old copy is restarted: it goes to the shell daemon
+        [ -f "$P21_APP_DIR/$P21_NATIVE" ] && _p21_daemon_changed=1
+        rm -f "$P21_APP_DIR/$P21_NATIVE"
+        nd2cn_log "WARN: could not install $P21_NATIVE; the shell data daemon will be used"
+        return 0
+    fi
+    if [ "$ND2CN_CHANGED" = "1" ]; then
+        _p21_changed=1
+        _p21_daemon_changed=1
+    fi
+    nd2cn_is_live || return 0
+    if _p21_st=$("$P21_APP_DIR/$P21_NATIVE" selftest 2>&1); then
+        nd2cn_log "native data daemon self-test: $_p21_st"
+    else
+        nd2cn_log "WARN: native data daemon cannot run from $P21_APP_DIR (exit $?: $_p21_st); dashboard-daemon.sh will try a copy in /tmp and else use its shell loop"
+    fi
     return 0
 }
 
@@ -105,6 +147,8 @@ plugin_apply() {
             return 1
         fi
     done
+
+    _p21_install_native
 
     # ── 2. GUI hook (after the files exist, so the loader never points at a
     #       missing script) ──
@@ -137,11 +181,11 @@ exit 0
 BOOTEOF
     [ "$ND2CN_CHANGED" = "1" ] && _p21_changed=1
 
-    # A daemon that is already running still executes the old script.
+    # A daemon that is already running still executes the old program.
     if [ "$_p21_daemon_changed" = "1" ] && nd2cn_is_live && \
        sh "$P21_APP_DIR/dashboard-daemon.sh" status > /dev/null 2>&1; then
-        sh "$P21_APP_DIR/dashboard-daemon.sh" restart
-        nd2cn_log "running data daemon restarted with the new script"
+        sh "$P21_APP_DIR/dashboard-daemon.sh" restart      # returns once the new daemon is up
+        nd2cn_log "data daemon restarted: $(sh "$P21_APP_DIR/dashboard-daemon.sh" status 2>/dev/null | head -n 1)"
     fi
 
     if [ "$_p21_changed" = "1" ]; then

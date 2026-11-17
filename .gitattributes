@@ -2,3 +2,4 @@
 # Force LF on checkout, including Windows clones with core.autocrlf=true.
 * text=auto eol=lf
 *.up binary
+app/nd2cn-dashd binary

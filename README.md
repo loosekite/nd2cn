@@ -73,7 +73,8 @@ USB_ROOT/
 ├── app/
 │   ├── dashboard.html
 │   ├── dashboard-daemon.sh
-│   └── dashboard-loader.js
+│   ├── dashboard-loader.js
+│   └── nd2cn-dashd             ← 仪表数据程序（ARM 可执行文件，源码在 native/）
 └── resources/
     └── (SSH 公钥、EQ 配置等)
 ```
@@ -168,7 +169,7 @@ touch /mnt/usb/PROBE
 
 安装开始前屏幕会出现一个 12 秒的英文提示（DATA PROBE）。车停稳、挂空挡、拉手刹，在这 12 秒里：踩住刹车 2 秒（先轻后重）、踩一下离合、左右转一下方向盘、轻点一下油门。这样这些通道的数据才会出现在记录里。
 
-结果在 U 盘上的两个文件里：`nd2cn-install.log`（带 `PROBE` 字样的行是汇总）和 `nd2cn-signals.txt`（原始记录）。不想再探测时删掉 `PROBE` 文件即可。
+结果在 U 盘上的三个文件里：`nd2cn-install.log`（带 `PROBE` 字样的行是汇总）、`nd2cn-signals.txt`（D-Bus 信号的原始记录）和 `nd2cn-smdb.txt`（共享数据区每一项在这 12 秒里的变化，以及全部数据库的内容；U 盘上有 `app/nd2cn-dashd` 且它能在车机上运行时才有）。不想再探测时删掉 `PROBE` 文件即可。
 
 ## 安装前须知
 
@@ -210,6 +211,41 @@ NA 固件不包含中文语音识别和 TTS 语音数据。切换到中文后，
 
 ### 校准
 CAN 信号的缩放因子可能需要在实车上校准。旋钮左/右推（停车时）打开校准面板，显示原始值和转换后的值。可通过 SSH 编辑 `/data/nd2cn/dashboard.conf` 调整参数。
+
+校准面板标题后面的 **C**、**C+** 或 **sh** 表示当前是哪个数据程序在供数（见下）。**C+** 表示 C 程序已经改为直接读共享数据区，不再启动车机自带的 `smdb-read`。
+
+面板最后两行用来判断显示是否流畅：
+
+- **序号 / 频率**：右边依次是数据每秒次数、页面每秒帧数，以及 `q2n0` 这样的负载档位。`q` 是画质（2 最高），`n` 是数字刷新（0 每帧，1 每 50 毫秒，2 每 100 毫秒）。车机画不动时会自动先降 `n` 再降 `q`。
+- **信号 / 延迟**：右边是回放延迟。车机每秒只给 10 次数据，页面为了让条和数字匀速变化，会比数据晚大约 0.14 秒显示；挡位、换挡颜色和报警不受这个延迟影响。
+
+### 数据程序
+仪表页面读取的数据由后台程序提供，有两个实现：
+
+| | `app/nd2cn-dashd`（C，默认） | `app/dashboard-daemon.sh`（脚本，后备） |
+|---|---|---|
+| 刷新率 | 每秒 10 次，即车机推送数据的上限 | 每秒 5–6 次（实车测得） |
+| 做法 | 直接用 D-Bus 协议收车机推送的每一帧 | 反复启动小程序去询问 |
+| 额外数据 | 四轮轮速，GPS 每秒 10 次 | 无 |
+| 运动平滑 | 每个采样带时间戳，页面按它匀速回放 | 无时间戳，页面按收到的时刻回放，略有顿挫 |
+
+安装时会在车上运行 `nd2cn-dashd selftest`，结果写进安装日志。它跑不起来时自动改用脚本，仪表照常可用。想强制用脚本，在 `/data/nd2cn/dashboard.conf` 里写 `DASH_NATIVE=off`。
+
+水温只存在于车机的共享数据区（SMDB）。`nd2cn-dashd` 会直接读这块共享内存（只读，格式见 `native/smdb-layout.md`），但先和车机自带的 `smdb-read` 对比：读数一致才停用 `smdb-read`，不一致就一直用它。
+
+它还带两个只读的探测命令，U盘上放了 `PROBE` 文件时安装程序会自动调用，结果写到U盘的 `nd2cn-smdb.txt`：
+
+```sh
+nd2cn-dashd smdb [库名...]            # 打印共享数据区里的每一项
+nd2cn-dashd smdbwatch 秒数 [库名]     # 每秒采样 10 次，列出每一项的变化
+```
+
+`nd2cn-dashd` 是静态链接的 ARMv7 程序，不依赖车机上的任何库，只读车辆数据，只写 `/tmp/nd2cn`。重新编译：
+
+```sh
+ZIG=/path/to/zig sh native/build.sh      # 需要 zig（只用作 C 交叉编译器）
+sh native/test/run.sh arm drive          # 在模拟总线上端到端测试（需要 qemu-user、dbus-daemon、python3-dbus）
+```
 
 ## 技术架构
 
