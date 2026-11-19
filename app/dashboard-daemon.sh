@@ -127,6 +127,19 @@ DASH_IDLE=auto          # auto: sleep while nobody reads the file; off: always a
 DASH_LINGER=30          # seconds without a reader before going idle
 DASH_DBUS_TIMEOUT=250   # ms, per method call
 DASH_NATIVE=auto        # auto: use nd2cn-dashd if it can run here; off: always this script
+# DASH_WS_PORT=7361     # nd2cn-dashd only: the WebSocket port it pushes the samples on
+                        #   (127.0.0.1); 0 = off, the page then reads the file
+# DASH_STATS=on         # nd2cn-dashd only: keep the highest brake pressure and what each
+                        #   run saw of the uncalibrated values in /data/nd2cn/dashd-stats.txt
+                        #   (flash; a new peak within 10 s, otherwise every 10 min); off = don't
+# Read by the page itself (dashboard.html, see CFG.shift* there), not here:
+# SHIFT_BEEP=long       # shift beep: long | short | off
+# SHIFT_RPM_12=7400     # r/min to shift at in 1st and 2nd
+# SHIFT_RPM=7100        # ... from 3rd up
+# SHIFT_LEAD_MS=450     # how early the beep comes
+# SHIFT_COLD_C=60       # coolant below this (0 = never): beep at
+# SHIFT_COLD_RPM=4500   #   this engine speed instead
+# BRAKE_FULL=0          # raw brake pressure for a full brake bar; 0 = the highest seen
 
 RPM_SCALE=2             # EngAout_N_Actl: 2 r/min per bit. Verified on the car (ND2 RF,
 RPM_OFFSET=0            #   74.00.324A, 2026-11-16): matches the tachometer, idle and revving
@@ -828,7 +841,7 @@ go_active() {
     MON_NEXT=$((NOW_CS + 500))
     HZ_COUNT=0
     HZ_NOW=0
-    poll_cool                           # the standby view opens on it: do not wait 2 s
+    poll_cool                           # the first view opens on it: do not wait 2 s
 }
 
 go_idle() {

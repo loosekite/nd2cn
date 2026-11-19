@@ -13,6 +13,7 @@ seqs = []
 times = []
 last = None
 first_active = None
+brakes = []
 while time.time() - t0 < seconds:
     reads += 1
     try:
@@ -31,6 +32,10 @@ while time.time() - t0 < seconds:
         seqs.append(o["seq"])
         times.append(time.time())
         last = o
+        # the brake as the page gets it: switch, pressure, its zero and the highest seen
+        b = (o.get("brake"), o.get("brake_p"), o.get("brake_p0"), o.get("brake_pmax"))
+        if not brakes or brakes[-1][1:] != b:
+            brakes.append((round(time.time() - t0, 1),) + b)
     time.sleep(0.04)
 gaps = [round((b - a) * 1000) for a, b in zip(times, times[1:])]
 span = (times[-1] - times[0]) if len(times) > 1 else 0
@@ -41,3 +46,5 @@ if span:
         (len(times) - 1) / span, min(gaps), sorted(gaps)[len(gaps) // 2], max(gaps),
         (seqs[-1] - seqs[0] + 1) - len(seqs)))
 print("last:", json.dumps(last, separators=(",", ":")))
+print("brake (s, switch, pressure, zero, highest):", " ".join("%s:%s/%s/%s/%s" % x for x in brakes))
+print("sample bytes:", len(json.dumps(last, separators=(",", ":"))) if last else 0)

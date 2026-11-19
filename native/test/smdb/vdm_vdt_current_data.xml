@@ -11,5 +11,7 @@
     <YawRate type="int" value="4094" />
     <EngClnt_Te_Actl type="int" value="0" />
     <BrakePressure type="int" value="152" />
+    <DR_IntakeAirTemp type="int" value="0" />
+    <Out-CarTemperature type="int" value="0" />
     <DR_BrakeStatic type="binary" size="120" value="0" />
 </vdm_vdt_current_data>

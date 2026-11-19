@@ -17,7 +17,11 @@
  * signals or for GPS, and a frame is forwarded the moment it is complete.
  *
  * It is READ-ONLY towards the car: it subscribes to signals and calls
- * "Get..." methods. It writes only below its run directory (/tmp/nd2cn).
+ * "Get..." methods. It writes below its run directory (/tmp/nd2cn), and one
+ * small file on the data partition, /data/nd2cn/dashd-stats.txt (the highest
+ * brake pressure seen, and what each run saw of the values whose scale is
+ * still unknown; at most every 10 s, usually far less; DASH_STATS=off: not at
+ * all). It listens only on 127.0.0.1.
  *
  * What the car sends (measured on the car, MX-5 ND2 RF, firmware 74.00.324A,
  * 2026-11-17, 13 s at idle): the vehicle bus services push their data in
@@ -36,7 +40,9 @@
  * A value that only comes "on change" is unknown until it changes, so the
  * start values are asked for once (BCM Get... methods; smdb-read for the
  * three vdt ones). GPS (com.jci.lds.data GetPosition) is asked for 10 times
- * a second; coolant is only in the shared memory database (SMDB).
+ * a second; coolant is only in the shared memory database (SMDB), as are
+ * the brake pressure, yaw rate, intake and outside temperature and the fuel
+ * gauge, which are read from there with every sample (see "brake pressure").
  *
  * The SMDB is read straight from its shared memory object, read-only (layout:
  * native/smdb-layout.md, worked out from libjcismdb.so; reader:
@@ -44,6 +50,10 @@
  * prove itself first: the firmware's own smdb-read tool is run as a child
  * process (as the shell version does, every 2 s), and only once both have
  * agreed on the coolant value twice is the tool no longer launched.
+ *
+ * Every sample is also pushed to the page over a WebSocket on 127.0.0.1
+ * (port DASH_WS_PORT, default 7361; the file names it as "ws"): read by
+ * polling, a sample waited up to 100 ms on the car. See "WebSocket push".
  *
  * Besides "run" there are two read-only helpers for exploring the car:
  *     nd2cn-dashd smdb [DB ...]            print every entry of the databases
@@ -63,6 +73,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/file.h>
@@ -70,12 +81,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/wait.h>
 #include <dirent.h>
 
 #include "smdb_reader.h"
 
-#define DASHD_VERSION "1"
+#define DASHD_VERSION "2"
 
 /* ───────────────────────── configuration ───────────────────────── */
 
@@ -100,6 +113,8 @@ static struct {
     int    linger_s;        /* seconds without a reader before going idle */
     int    gps_ms;          /* period of the GPS question */
     int    cool_s;          /* period of the coolant read */
+    int    ws_port;         /* WebSocket push on 127.0.0.1 (0 = off) */
+    int    stats_off;       /* DASH_STATS=off: keep no brake peak on the flash */
 } cfg = {
     .bus = "/tmp/dbus_service_socket",
     .dir = "/tmp/nd2cn",
@@ -117,6 +132,7 @@ static struct {
     .speed_offset = 10000, .speed_div = 100,
     .gearbox = "",
     .idle_auto = 1, .linger_s = 30, .gps_ms = 100, .cool_s = 2,
+    .ws_port = 7361,
 };
 
 static char path_out[200], path_tmp[200], path_pid[200], path_lock[200];
@@ -156,7 +172,7 @@ static void conf_set(const char *k, const char *v)
         { "STEER_SIGNED", &cfg.steer_signed, 0, 1 }, { "LATG_SIGNED", &cfg.latg_signed, 0, 1 },
         { "LONG_SIGNED", &cfg.long_signed, 0, 1 },
         { "DASH_LINGER", &cfg.linger_s, 0, 86400 }, { "DASH_GPS_MS", &cfg.gps_ms, 50, 5000 },
-        { "DASH_COOL_S", &cfg.cool_s, 1, 600 },
+        { "DASH_COOL_S", &cfg.cool_s, 1, 600 }, { "DASH_WS_PORT", &cfg.ws_port, 0, 65535 },
     };
     size_t i;
     char *end;
@@ -179,6 +195,8 @@ static void conf_set(const char *k, const char *v)
         else cfg.gearbox[0] = 0;
     } else if (strcmp(k, "DASH_IDLE") == 0) {
         cfg.idle_auto = strcmp(v, "off") != 0;
+    } else if (strcmp(k, "DASH_STATS") == 0) {
+        cfg.stats_off = strcmp(v, "off") == 0;
     }
 }
 
@@ -293,7 +311,8 @@ static int64_t last_reader;             /* when the page last read the file */
                                            read even with relatime, and even
                                            while the CMU clock still says 1970 */
 
-struct jbuf { char s[1400]; size_t n; };
+#define SAMPLE_MAX 1800                 /* one sample as JSON, at most (about 900 now) */
+struct jbuf { char s[SAMPLE_MAX]; size_t n; };
 
 static void jput(struct jbuf *j, const char *fmt, ...)
 {
@@ -362,6 +381,12 @@ static int write_file(const char *text, size_t len)
 }
 
 static const char *smdb_source(void);
+static int ws_port_live(void);
+static char ws_key[33];
+static void ws_publish(const char *text, size_t len);
+static void extras_read(int64_t now);
+static void extras_json(struct jbuf *j);
+static void extras_raw(struct jbuf *j);
 
 static void publish(int64_t now)
 {
@@ -370,6 +395,7 @@ static void publish(int64_t now)
     j.n = 0;
     seq++; pub_count++;
     frame_dirty = 0; deadline = 0; last_pub = now;
+    extras_read(now);
 
     jput(&j, "{\"speed\":");
     /* The engine-side speed (Veh_V_ActlEng) is what the dashboard has always
@@ -384,6 +410,7 @@ static void publish(int64_t now)
     if (gearbox[0]) jput(&j, ",\"gearbox\":\"%s\"", gearbox); else jput(&j, ",\"gearbox\":null");
     jput(&j, ",\"throttle\":"); jconv(&j, C_THR, cfg.thr_scale, cfg.thr_offset, 0, 1, 0);
     jput(&j, ",\"brake\":");    jraw(&j, C_BRAKE);
+    extras_json(&j);
     jput(&j, ",\"steering\":");
     /* 32766 (0x7FFE) is what the firmware holds before the first CAN frame,
      * 32767 the invalid marker */
@@ -410,9 +437,11 @@ static void publish(int64_t now)
         jput(&j, ",\"gps_lat\":null,\"gps_lon\":null,\"gps_heading\":null,\"gps_speed\":null,\"gps_fix\":null");
     /* "t": when this sample was made, in milliseconds on a clock that never
      * jumps. The page places the sample in time by it; the moment its poll
-     * happens to read the file is up to one poll period late, and uneven. */
-    jput(&j, ",\"ts\":%ld,\"t\":%lld,\"seq\":%u,\"hz\":%d,\"sig\":%u,\"src\":\"native\",\"smdb\":\"%s\",\"raw\":{\"rpm\":",
-         (long)time(NULL), (long long)now, (unsigned)seq, pub_hz, (unsigned)nsig, smdb_source());
+     * happens to read the file is up to one poll period late, and uneven.
+     * "ws": the port this sample is also pushed on (0: none), "wsk" the key
+     * to name when connecting; see "WebSocket push" */
+    jput(&j, ",\"ts\":%ld,\"t\":%lld,\"seq\":%u,\"hz\":%d,\"sig\":%u,\"ws\":%d,\"wsk\":\"%s\",\"src\":\"native\",\"smdb\":\"%s\",\"raw\":{\"rpm\":",
+         (long)time(NULL), (long long)now, (unsigned)seq, pub_hz, (unsigned)nsig, ws_port_live(), ws_key, smdb_source());
     jraw(&j, C_RPM);
     jput(&j, ",\"thr\":");   jraw(&j, C_THR);
     jput(&j, ",\"steer\":"); jraw(&j, C_STEER);
@@ -423,10 +452,12 @@ static void publish(int64_t now)
     jput(&j, ",\"spd\":");   jraw(&j, C_SPD);
     jput(&j, ",\"gear\":");  jraw(&j, C_GEAR);
     jput(&j, ",\"lever\":"); jraw(&j, C_LEVER);
+    extras_raw(&j);
     jput(&j, "}}\n");
 
     check_reader(now);
     write_file(j.s, j.n);
+    ws_publish(j.s, j.n);
 }
 
 /* The heartbeat while nobody is looking. Returns 1 if the previous one was read. */
@@ -967,6 +998,14 @@ enum { Q_COOL, Q_RPM, Q_THR, Q_STEER, Q_N };
 static const char *const Q_KEY[Q_N] = { "EngClnt_Te_Actl", "EngineSpeed", "AccelPedalPosition", "SteeringWheel" };
 static unsigned char q_want[Q_N];
 
+/* More values, read straight from the mapped database with every sample once
+ * that is trusted, and never through smdb-read (a process launch per value,
+ * ten times a second, is out of the question). See "brake pressure" below. */
+enum { X_BRKP, X_YAW, X_IAT, X_OUT, X_FUEL, X_N };
+static const char *const X_KEY[X_N]  = { "BrakePressure", "YawRate", "DR_IntakeAirTemp", "Out-CarTemperature", "FuelGaugePosition" };
+static const char *const X_JSON[X_N] = { "brkp", "yaw", "iat", "out", "fuel" };
+static int sdb_xidx[X_N];
+
 #define SMDB_DB "vdm_vdt_current_data"
 static struct smdb_ro sdb;
 static int sdb_open;                    /* the object is mapped and looks like a database */
@@ -1022,6 +1061,7 @@ static void sdb_try_open(int64_t now)
      * no entries yet, entries still zero) and is simply tried again. */
     if (smdb_ro_open_path(p, &sdb) != SMDB_RO_OK) return;
     for (i = 0; i < Q_N; i++) sdb_idx[i] = smdb_ro_find(&sdb, Q_KEY[i]);
+    for (i = 0; i < X_N; i++) sdb_xidx[i] = smdb_ro_find(&sdb, X_KEY[i]);
     if (sdb_idx[Q_COOL] < 0) {          /* complete, but not the layout this program knows */
         smdb_ro_close(&sdb);
         sdb_trust = -1;
@@ -1091,6 +1131,219 @@ static void smdb_want(int q)
 }
 
 static const char *smdb_source(void) { return sdb_trust > 0 ? "direct" : "tool"; }
+
+/* ───────────────────────── brake pressure and the other database values ───────────────────────── */
+
+/* What the car showed (2026-11-18, engine idling, standing, the probe's 12 s
+ * watch of the database ten times a second):
+ *     BrakePressure       149..153 with the pedal released, 393 on a firm
+ *                         press that was not full force. The unit is not
+ *                         known; the firmware's own start value is 152, so
+ *                         that is "no pressure".
+ *     YawRate             2044..2048 standing (4094, the start value: nothing received)
+ *     DR_IntakeAirTemp    66..67
+ *     Out-CarTemperature  64
+ *     FuelGaugePosition   100..101
+ * None of the scales is known yet, so they go out as they are ("raw"), and
+ * the page shows the brake pressure against the highest one seen on this car
+ * ("brake_p0" .. "brake_pmax"). That highest value is kept in a small file on
+ * the data partition, with what each run saw, so that it survives power-off
+ * and the installer can put it into its log (where the scales can then be
+ * worked out). */
+static struct { long v; int have, seen; long lo, hi; } xv[X_N];
+static struct {
+    double rest; int have_rest;         /* released, smoothed */
+    long cand; int cand_n;              /* a new zero, and how many values in a row agree with it */
+    long prev, prev2; int64_t prev_t, prev2_t;  /* the two samples before */
+    long peak;                          /* highest ever (file + this run) */
+    long run_peak; double run_kmh;      /* highest in this run, and the speed then */
+} bp;
+
+static char stats_path[200] = "/data/nd2cn/dashd-stats.txt";
+#define STATS_KEEP 9                    /* runs kept besides this one */
+static char stats_old[STATS_KEEP][256];
+static int stats_nold, stats_run, stats_peak_dirty, stats_range_dirty, stats_any;
+static int64_t stats_written;
+
+/* the value to keep a range of: not a start value that only says "nothing received" */
+static int x_real(int i, long v)
+{
+    if (i == X_YAW) return v < 4094;
+    if (i == X_IAT || i == X_OUT) return v > 0;
+    return 1;
+}
+
+static double speed_now(void)
+{
+    if (have[C_VSS]) return (double)raw[C_VSS] * cfg.vss_scale;
+    if (have[C_SPD] && raw[C_SPD] >= 0 && raw[C_SPD] < 65535) {
+        double k = ((double)raw[C_SPD] - cfg.speed_offset) / cfg.speed_div;
+        return k < 0 ? 0 : k;
+    }
+    return -1;
+}
+
+static void extras_read(int64_t now)
+{
+    int i;
+    long v, p, c;
+    for (i = 0; i < X_N; i++) {
+        xv[i].have = 0;
+        if (!sdb_open || sdb_trust <= 0 || sdb_xidx[i] < 0) continue;
+        if (smdb_ro_read_int(&sdb, sdb_xidx[i], &v) != SMDB_RO_OK || v < 0 || v > 65534) continue;
+        if (i == X_BRKP && v == 0) continue;         /* an empty database, not a pressure */
+        xv[i].v = v; xv[i].have = 1;
+        if (!x_real(i, v)) continue;
+        if (!xv[i].seen) { xv[i].lo = xv[i].hi = v; xv[i].seen = 1; stats_range_dirty = 1; }
+        else if (v < xv[i].lo) { xv[i].lo = v; stats_range_dirty = 1; }
+        else if (v > xv[i].hi) { xv[i].hi = v; stats_range_dirty = 1; }
+        stats_any = 1;
+    }
+    if (!xv[X_BRKP].have) { bp.prev_t = bp.prev2_t = 0; return; }
+    /* A sample is also published for some events between two frames: the
+     * database still holds the value it had at the frame, and reading it
+     * again must not count as a second sample. */
+    if (bp.prev_t && now - bp.prev_t < 60 && now >= bp.prev_t) return;
+    p = xv[X_BRKP].v;
+    /* "no pressure", learnt while the brake switch says released. A value
+     * far from it is a stray one and left out. The zero itself is taken
+     * from values that agree with each other: five in a row at first, and
+     * twenty in a row (two seconds) to replace one that turns out wrong. */
+    if (have[C_BRAKE] && raw[C_BRAKE] == 1) {
+        if (bp.have_rest && (double)p <= bp.rest + 30 && (double)p >= bp.rest - 30) {
+            bp.rest += ((double)p - bp.rest) / 16;
+            bp.cand_n = 0;
+        } else {
+            if (bp.cand_n && p <= bp.cand + 30 && p >= bp.cand - 30) bp.cand_n++;
+            else { bp.cand = p; bp.cand_n = 1; }
+            if (bp.cand_n >= (bp.have_rest ? 20 : 5)) { bp.rest = (double)bp.cand; bp.have_rest = 1; bp.cand_n = 0; }
+        }
+    }
+    /* A peak counts when three samples in a row (three frames, 0.2 s and
+     * more) reached it with the pedal down: one or two odd values are not a
+     * press, a hard stop holds its pressure far longer. The highest ever is
+     * kept on flash, so values from 32766 up, which look like a "not
+     * received" mark (the steering angle uses 32766), never count. */
+    if (bp.prev_t && bp.prev2_t && now - bp.prev2_t <= 500 && now >= bp.prev2_t && bp.prev_t >= bp.prev2_t
+        && have[C_BRAKE] && raw[C_BRAKE] == 2) {
+        c = p < bp.prev ? p : bp.prev;
+        if (bp.prev2 < c) c = bp.prev2;
+        if (c < 32766) {
+            if (c > bp.run_peak) { bp.run_peak = c; bp.run_kmh = speed_now(); stats_range_dirty = 1; }
+            if (c > bp.peak) { bp.peak = c; stats_peak_dirty = 1; }
+        }
+    }
+    bp.prev2 = bp.prev; bp.prev2_t = bp.prev_t;
+    bp.prev = p; bp.prev_t = now;
+}
+
+static void extras_json(struct jbuf *j)
+{
+    if (xv[X_BRKP].have) jput(j, ",\"brake_p\":%ld", xv[X_BRKP].v); else jput(j, ",\"brake_p\":null");
+    if (bp.have_rest) jput(j, ",\"brake_p0\":%.0f", bp.rest); else jput(j, ",\"brake_p0\":null");
+    if (bp.peak > 0) jput(j, ",\"brake_pmax\":%ld", bp.peak); else jput(j, ",\"brake_pmax\":null");
+}
+
+static void extras_raw(struct jbuf *j)
+{
+    int i;
+    for (i = 0; i < X_N; i++) {
+        if (xv[i].have) jput(j, ",\"%s\":%ld", X_JSON[i], xv[i].v);
+        else jput(j, ",\"%s\":null", X_JSON[i]);
+    }
+}
+
+/* The file: comment lines, "brake_peak=N" (the highest ever), then one line
+ * per run, oldest first; the last STATS_KEEP runs are kept. */
+static void stats_load(void)
+{
+    FILE *f;
+    char line[256];
+    int cut = 0, whole;
+    long n;
+    stats_run = 0;
+    if (!stats_path[0]) return;
+    f = fopen(stats_path, "r");
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            char *nl = strchr(line, '\n');
+            whole = !cut;
+            cut = nl == NULL && !feof(f);
+            if (!whole || cut) continue;            /* too long for the buffer: not ours */
+            if (nl) *nl = 0;
+            if (strncmp(line, "brake_peak=", 11) == 0) {
+                n = strtol(line + 11, NULL, 10);
+                if (n > 0 && n <= 65534 && n > bp.peak) bp.peak = n;
+            } else if (strncmp(line, "run=", 4) == 0) {
+                n = strtol(line + 4, NULL, 10);
+                if (n > stats_run && n < 1000000) stats_run = (int)n;
+                if (stats_nold == STATS_KEEP) {
+                    memmove(stats_old[0], stats_old[1], sizeof stats_old[0] * (STATS_KEEP - 1));
+                    stats_nold--;
+                }
+                snprintf(stats_old[stats_nold++], sizeof stats_old[0], "%s", line);
+            }
+        }
+        fclose(f);
+    }
+    stats_run++;
+}
+
+static void stats_range(FILE *f, const char *name, int i)
+{
+    if (xv[i].seen) fprintf(f, " %s=%ld..%ld", name, xv[i].lo, xv[i].hi);
+    else fprintf(f, " %s=-", name);
+}
+
+static void stats_write(int64_t now)
+{
+    char tmp[220];
+    FILE *f;
+    int i, ok;
+    stats_written = now;
+    stats_peak_dirty = stats_range_dirty = 0;
+    if (!stats_path[0] || !stats_any) return;
+    snprintf(tmp, sizeof tmp, "%s.tmp", stats_path);
+    f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "# nd2cn-dashd: raw values from vdm_vdt_current_data seen on this car, newest run last\n"
+               "# brake = BrakePressure (unit unknown, 152 = released); a peak is held for three samples (frames) with the pedal down\n"
+               "brake_peak=");
+    if (bp.peak > 0) fprintf(f, "%ld\n", bp.peak); else fprintf(f, "-\n");
+    for (i = 0; i < stats_nold; i++) fprintf(f, "%s\n", stats_old[i]);
+    fprintf(f, "run=%d up=%llds", stats_run, (long long)(now / 1000));
+    if (bp.have_rest) fprintf(f, " brake_rest=%.0f", bp.rest); else fprintf(f, " brake_rest=-");
+    if (bp.run_peak > 0) {
+        fprintf(f, " brake_peak=%ld", bp.run_peak);
+        if (bp.run_kmh >= 0) fprintf(f, "@%.0fkm/h", bp.run_kmh);
+    } else {
+        fprintf(f, " brake_peak=-");
+    }
+    stats_range(f, "brake", X_BRKP);
+    stats_range(f, "yaw", X_YAW);
+    stats_range(f, "iat", X_IAT);
+    stats_range(f, "out", X_OUT);
+    stats_range(f, "fuel", X_FUEL);
+    fprintf(f, "\n");
+    /* (a write that failed part way, the partition full, leaves the error
+     * mark only: fflush and fclose can still say all is well) */
+    ok = fflush(f) == 0 && !ferror(f);
+    /* the car is switched off by cutting the power: it has to be on the flash */
+    if (ok) ok = fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = 0;
+    if (ok) rename(tmp, stats_path); else unlink(tmp);
+}
+
+/* A new highest-ever peak is written within 10 s, everything else at most
+ * every 10 minutes: the file is on flash. force 1 (going idle): a new peak
+ * now; force 2 (stopping): whatever is left. */
+static void stats_tick(int64_t now, int force)
+{
+    if (!stats_peak_dirty && !stats_range_dirty) return;
+    if (now < stats_written) stats_written = now;   /* the clock went back */
+    if (force == 2 || (stats_peak_dirty && (force || now - stats_written >= 10000)) || now - stats_written >= 600000)
+        stats_write(now);
+}
 
 /* The tool: one read is a process launch that loads five libraries (0.4 s
  * was measured during boot). The child runs beside the main loop; its output
@@ -1198,6 +1451,378 @@ static void child_poll(int64_t now)
     }
 }
 
+/* ───────────────────────── WebSocket push ───────────────────────── */
+
+/* The page used to poll the file: on the car one round of "read the file"
+ * waits behind the frame being drawn (the page has one thread, a frame takes
+ * 25 to 33 ms) and took 70 to 100 ms, as long as the time between two frames
+ * of data. Samples came unevenly late, some were missed, and the page had to
+ * play back 200 to 240 ms behind the car to keep the motion going. Pushed,
+ * a sample is there as soon as the page's thread is free.
+ *
+ * A plain RFC 6455 server, just enough of it: 127.0.0.1 only, text frames
+ * out; in, a close is answered, a ping gets its pong, anything else is read
+ * and thrown away. The file stays as it is (the page reads it first, learns
+ * the port from "ws", and falls back to it).
+ *
+ * Who may connect: the car's position is in every sample, and the browser
+ * also shows web pages. A web page's request carries its origin, but one
+ * inside a sandboxed frame or a data: URL says "null", as a page from a file
+ * does. So the request must also name a key that changes with every run of
+ * this program and is only written into the file ("wsk"): a page from a
+ * file can read the file, a web page cannot. */
+
+#define WS_MAX 4
+static const char WS_GUID[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+static int ws_lfd = -1;
+static int64_t ws_retry;
+static char ws_key[33];                 /* hex, new every run (declared above) */
+static struct wsc {
+    int fd, open;
+    int64_t since;                      /* connected (handshake) / opened */
+    int64_t stall;                      /* since when nothing could be sent (0: sending) */
+    size_t n; char req[2048];           /* the request, until the handshake */
+    /* reading the client's frames */
+    uint8_t hd[14]; unsigned hn, hneed; /* header bytes so far, and needed */
+    uint64_t left;                      /* payload bytes still to come */
+    uint8_t op, mask[4]; unsigned pos;  /* opcode, mask, payload offset */
+    uint8_t ctl[125]; unsigned cn;      /* a control frame's payload */
+} wsc[WS_MAX];
+static char ws_last[SAMPLE_MAX];              /* the newest sample, for a page that just connected */
+static size_t ws_last_len;
+
+static uint32_t rol32(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+
+/* SHA-1 of a short message (the handshake key): what the protocol asks for */
+static int sha1(const uint8_t *m, size_t len, uint8_t out[20])
+{
+    uint32_t h[5] = { 0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u };
+    uint8_t b[256];
+    uint64_t bits = (uint64_t)len * 8;
+    size_t n = ((len + 8) / 64 + 1) * 64, off, i;
+    if (n > sizeof b) return -1;
+    memset(b, 0, n);
+    memcpy(b, m, len);
+    b[len] = 0x80;
+    for (i = 0; i < 8; i++) b[n - 1 - i] = (uint8_t)(bits >> (8 * i));
+    for (off = 0; off < n; off += 64) {
+        uint32_t w[80], a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f, k, t;
+        for (i = 0; i < 16; i++)
+            w[i] = (uint32_t)b[off + 4 * i] << 24 | (uint32_t)b[off + 4 * i + 1] << 16 |
+                   (uint32_t)b[off + 4 * i + 2] << 8 | (uint32_t)b[off + 4 * i + 3];
+        for (i = 16; i < 80; i++) w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        for (i = 0; i < 80; i++) {
+            if (i < 20)      { f = (bb & c) | (~bb & d);           k = 0x5A827999u; }
+            else if (i < 40) { f = bb ^ c ^ d;                     k = 0x6ED9EBA1u; }
+            else if (i < 60) { f = (bb & c) | (bb & d) | (c & d);  k = 0x8F1BBCDCu; }
+            else             { f = bb ^ c ^ d;                     k = 0xCA62C1D6u; }
+            t = rol32(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rol32(bb, 30); bb = a; a = t;
+        }
+        h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e;
+    }
+    for (i = 0; i < 20; i++) out[i] = (uint8_t)(h[i / 4] >> (24 - 8 * (i % 4)));
+    return 0;
+}
+
+static void base64(const uint8_t *in, size_t n, char *out)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t i, o = 0;
+    uint32_t v;
+    for (i = 0; i + 2 < n; i += 3) {
+        v = (uint32_t)in[i] << 16 | (uint32_t)in[i + 1] << 8 | in[i + 2];
+        out[o++] = T[v >> 18 & 63]; out[o++] = T[v >> 12 & 63]; out[o++] = T[v >> 6 & 63]; out[o++] = T[v & 63];
+    }
+    if (n - i == 1) {
+        v = (uint32_t)in[i] << 16;
+        out[o++] = T[v >> 18 & 63]; out[o++] = T[v >> 12 & 63]; out[o++] = '='; out[o++] = '=';
+    } else if (n - i == 2) {
+        v = (uint32_t)in[i] << 16 | (uint32_t)in[i + 1] << 8;
+        out[o++] = T[v >> 18 & 63]; out[o++] = T[v >> 12 & 63]; out[o++] = T[v >> 6 & 63]; out[o++] = '=';
+    }
+    out[o] = 0;
+}
+
+/* The value of header NAME (lower case, no colon) of a request, or NULL */
+static const char *http_header(const char *req, const char *name, size_t *vlen)
+{
+    size_t nl = strlen(name);
+    const char *p = strstr(req, "\r\n");
+    while (p && p[2] && p[2] != '\r') {
+        const char *line = p + 2, *e = strstr(line, "\r\n"), *v, *ve;
+        if (!e) return NULL;
+        if ((size_t)(e - line) > nl && strncasecmp(line, name, nl) == 0 && line[nl] == ':') {
+            v = line + nl + 1;
+            while (v < e && (*v == ' ' || *v == '\t')) v++;
+            ve = e;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            *vlen = (size_t)(ve - v);
+            return v;
+        }
+        p = e;
+    }
+    return NULL;
+}
+
+/* A page loaded from a file says "null" or "file://"; a program that is not
+ * a browser sends none. Anything else is a web page. */
+static int ws_origin_ok(const char *v, size_t n)
+{
+    if (!v) return 1;
+    if (n == 4 && strncmp(v, "null", 4) == 0) return 1;
+    return n >= 5 && strncasecmp(v, "file:", 5) == 0;
+}
+
+/* "GET /?k=<key> HTTP/1.1": compared in full, every byte */
+static int ws_key_ok(const char *req)
+{
+    const char *p = req + 4, *e = strchr(p, ' ');
+    size_t i, n = strlen(ws_key);
+    unsigned d = 0;
+    if (!e || (size_t)(e - p) != 4 + n || strncmp(p, "/?k=", 4) != 0) return 0;
+    for (i = 0; i < n; i++) d |= (unsigned)(p[4 + i] ^ ws_key[i]);
+    return d == 0;
+}
+
+static void ws_make_key(void)
+{
+    static const char hx[] = "0123456789abcdef";
+    uint8_t r[16];
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC), i, got = 0;
+    if (fd >= 0) { got = read(fd, r, sizeof r) == (ssize_t)sizeof r; close(fd); }
+    if (!got) {                         /* never seen; still not guessable from a web page */
+        uint64_t x = (uint64_t)now_ms() * 6364136223846793005ULL ^ (uint64_t)getpid() << 32 ^ (uint64_t)time(NULL);
+        for (i = 0; i < 16; i++) { x = x * 6364136223846793005ULL + 1442695040888963407ULL; r[i] = (uint8_t)(x >> 56); }
+        vlog("ws: no /dev/urandom, key from the clock");
+    }
+    for (i = 0; i < 16; i++) { ws_key[2 * i] = hx[r[i] >> 4]; ws_key[2 * i + 1] = hx[r[i] & 15]; }
+    ws_key[32] = 0;
+}
+
+static int ws_port_live(void) { return ws_lfd >= 0 ? cfg.ws_port : 0; }
+
+static void ws_drop(int i)
+{
+    if (wsc[i].fd >= 0) close(wsc[i].fd);
+    wsc[i].fd = -1; wsc[i].open = 0; wsc[i].n = 0; wsc[i].stall = 0;
+}
+
+static int ws_open_count(void)
+{
+    int i, n = 0;
+    for (i = 0; i < WS_MAX; i++) n += wsc[i].fd >= 0 && wsc[i].open;
+    return n;
+}
+
+static void ws_send(int i, const char *text, size_t len, int64_t now)
+{
+    static uint8_t fb[sizeof ws_last + 4];
+    size_t hl;
+    ssize_t r;
+    if (len > sizeof ws_last) return;
+    fb[0] = 0x81;                                   /* final fragment, text */
+    if (len < 126) { fb[1] = (uint8_t)len; hl = 2; }
+    else { fb[1] = 126; fb[2] = (uint8_t)(len >> 8); fb[3] = (uint8_t)len; hl = 4; }
+    memcpy(fb + hl, text, len);
+    r = send(wsc[i].fd, fb, hl + len, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (r == (ssize_t)(hl + len)) { wsc[i].stall = 0; return; }
+    /* Nothing went out: the page is not reading (busy, or hung). Skip this
+     * sample; a page that has taken nothing for 3 s is dropped (the send
+     * buffer is kept small, see ws_accept, so that shows soon). Part of a
+     * frame went out: the stream is broken, drop it now. */
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+        if (!wsc[i].stall) wsc[i].stall = now;
+        if (now - wsc[i].stall < 3000) return;
+    }
+    vlog("ws: client %d dropped (send)", i);
+    ws_drop(i);
+}
+
+static void ws_publish(const char *text, size_t len)
+{
+    int i;
+    int64_t now = now_ms();
+    if (len > sizeof ws_last) return;
+    memcpy(ws_last, text, len);
+    ws_last_len = len;
+    for (i = 0; i < WS_MAX; i++) if (wsc[i].fd >= 0 && wsc[i].open) ws_send(i, text, len, now);
+}
+
+static void ws_listen(int64_t now)
+{
+    struct sockaddr_in a;
+    int fd, one = 1;
+    if (ws_lfd >= 0 || cfg.ws_port <= 0 || now < ws_retry) return;
+    ws_retry = now + 5000;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)cfg.ws_port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
+        vlog("ws: port %d: %s", cfg.ws_port, strerror(errno));
+        close(fd);
+        return;
+    }
+    ws_lfd = fd;
+    vlog("ws: listening on 127.0.0.1:%d", cfg.ws_port);
+}
+
+static void ws_accept(int64_t now)
+{
+    int fd, i, j, sb = 4096;
+    while ((fd = accept(ws_lfd, NULL, NULL)) >= 0) {
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+        fcntl(fd, F_SETFL, O_NONBLOCK);
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof sb);
+        /* all taken: the oldest goes. A page that connects is the one on
+         * screen; what came before it is a page that is gone or hung. One
+         * that has not been let in yet goes first: connections that never
+         * show the key must not push out the page that did. */
+        for (i = 0; i < WS_MAX && wsc[i].fd >= 0; i++) {}
+        if (i == WS_MAX) {
+            for (i = 0, j = 1; j < WS_MAX; j++)
+                if (wsc[j].open < wsc[i].open || (wsc[j].open == wsc[i].open && wsc[j].since < wsc[i].since)) i = j;
+            vlog("ws: client %d dropped (full)", i);
+            ws_drop(i);
+        }
+        memset(&wsc[i], 0, sizeof wsc[i]);
+        wsc[i].fd = fd; wsc[i].since = now;
+    }
+    /* Out of descriptors: the connection stays queued and the socket keeps
+     * saying so; stop listening for a while rather than spin. */
+    if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+        vlog("ws: accept: %s", strerror(errno));
+        close(ws_lfd); ws_lfd = -1; ws_retry = now + 5000;
+    }
+}
+
+static void ws_handshake(int i, int64_t now)
+{
+    static const char no[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    char key[64 + sizeof WS_GUID], acc[32], resp[200];
+    const char *k, *o;
+    size_t kl = 0, ol = 0;
+    uint8_t dg[20];
+    int n;
+    k = http_header(wsc[i].req, "sec-websocket-key", &kl);
+    o = http_header(wsc[i].req, "origin", &ol);
+    if (strncmp(wsc[i].req, "GET ", 4) != 0 || !k || kl == 0 || kl > 64 || !ws_origin_ok(o, ol) || !ws_key_ok(wsc[i].req)) {
+        vlog("ws: refused (origin %.*s, key %s)", o ? (int)ol : 1, o ? o : "-", ws_key_ok(wsc[i].req) ? "ok" : "wrong");
+        if (send(wsc[i].fd, no, sizeof no - 1, MSG_NOSIGNAL | MSG_DONTWAIT) < 0) {}
+        ws_drop(i);
+        return;
+    }
+    memcpy(key, k, kl);
+    memcpy(key + kl, WS_GUID, sizeof WS_GUID - 1);
+    sha1((const uint8_t *)key, kl + sizeof WS_GUID - 1, dg);
+    base64(dg, 20, acc);
+    n = snprintf(resp, sizeof resp, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                 "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);
+    if (send(wsc[i].fd, resp, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n) { ws_drop(i); return; }
+    wsc[i].open = 1; wsc[i].since = now;
+    wsc[i].hn = 0; wsc[i].hneed = 2;
+    vlog("ws: client %d open", i);
+    if (ws_last_len) ws_send(i, ws_last, ws_last_len, now);
+}
+
+/* A control frame from the client, complete: returns 0 when it is closed */
+static int ws_control(int i)
+{
+    static uint8_t pong[2 + 125];
+    struct wsc *c = &wsc[i];
+    if (c->op == 8) {
+        static const uint8_t bye[2] = { 0x88, 0x00 };
+        if (send(c->fd, bye, 2, MSG_NOSIGNAL | MSG_DONTWAIT) < 0) {}
+        vlog("ws: client %d closed", i);
+        ws_drop(i);
+        return 0;
+    }
+    if (c->op == 9) {
+        pong[0] = 0x8a; pong[1] = (uint8_t)c->cn;
+        memcpy(pong + 2, c->ctl, c->cn);
+        /* (all of it or the stream is broken, as in ws_send) */
+        if (send(c->fd, pong, 2 + c->cn, MSG_NOSIGNAL | MSG_DONTWAIT) != (ssize_t)(2 + c->cn)) {
+            vlog("ws: client %d dropped (pong)", i);
+            ws_drop(i);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* What the client sent, frame by frame: control frames are acted on, the
+ * rest is skipped. Up to 8 KB a round, so that a client sending a lot
+ * cannot hold up the samples. */
+static void ws_input(int i, int64_t now)
+{
+    uint8_t b[1024];
+    ssize_t r;
+    size_t k;
+    int round;
+    struct wsc *c = &wsc[i];
+    if (!c->open) {
+        r = read(c->fd, c->req + c->n, sizeof c->req - 1 - c->n);
+        if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) { ws_drop(i); return; }
+        if (r < 0) return;
+        c->n += (size_t)r;
+        c->req[c->n] = 0;
+        if (strstr(c->req, "\r\n\r\n")) ws_handshake(i, now);
+        else if (c->n >= sizeof c->req - 1) ws_drop(i);
+        return;
+    }
+    for (round = 0; round < 8; round++) {
+        r = read(c->fd, b, sizeof b);
+        if (r < 0 && (errno == EAGAIN || errno == EINTR)) return;
+        if (r <= 0) { vlog("ws: client %d closed", i); ws_drop(i); return; }
+        for (k = 0; k < (size_t)r; ) {
+            if (c->hn < c->hneed) {                 /* the header */
+                c->hd[c->hn++] = b[k++];
+                if (c->hn == 2) {
+                    unsigned l7 = c->hd[1] & 127;
+                    c->hneed = 2 + (l7 == 126 ? 2 : l7 == 127 ? 8 : 0) + ((c->hd[1] & 128) ? 4 : 0);
+                }
+                if (c->hn < c->hneed) continue;
+                {
+                    unsigned l7 = c->hd[1] & 127, h = 2, m;
+                    uint64_t len = l7;
+                    if (l7 == 126) { len = (uint64_t)c->hd[2] << 8 | c->hd[3]; h = 4; }
+                    else if (l7 == 127) { len = 0; for (m = 0; m < 8; m++) len = len << 8 | c->hd[2 + m]; h = 10; }
+                    if (c->hd[1] & 128) memcpy(c->mask, c->hd + h, 4); else memset(c->mask, 0, 4);
+                    c->op = c->hd[0] & 15;
+                    c->left = len; c->pos = 0; c->cn = 0;
+                    /* a control frame is short and in one piece */
+                    if (c->op >= 8 && (len > 125 || !(c->hd[0] & 128))) { vlog("ws: client %d: bad frame", i); ws_drop(i); return; }
+                }
+            } else {                                /* the payload */
+                size_t take = (size_t)r - k;
+                if ((uint64_t)take > c->left) take = (size_t)c->left;
+                if (c->op >= 8) {
+                    size_t m;
+                    for (m = 0; m < take; m++) c->ctl[c->cn++] = b[k + m] ^ c->mask[(c->pos + m) & 3];
+                }
+                c->pos += (unsigned)take; c->left -= take; k += take;
+            }
+            if (c->hn == c->hneed && c->left == 0) {   /* frame complete */
+                if (c->op >= 8 && !ws_control(i)) return;
+                c->hn = 0; c->hneed = 2;
+            }
+        }
+    }
+}
+
+static void ws_close_all(void)
+{
+    int i;
+    for (i = 0; i < WS_MAX; i++) if (wsc[i].fd >= 0) ws_drop(i);
+    if (ws_lfd >= 0) { close(ws_lfd); ws_lfd = -1; }
+}
+
 /* ───────────────────────── main loop ───────────────────────── */
 
 static volatile sig_atomic_t stop_flag;
@@ -1290,6 +1915,11 @@ static int run(void)
     strcpy(gearbox, cfg.gearbox);
     atime_ok = cfg.idle_auto && atime_selftest();
     now = now_ms();
+    { int i; for (i = 0; i < WS_MAX; i++) wsc[i].fd = -1; }
+    ws_make_key();
+    ws_listen(now);
+    stats_load();
+    stats_written = now;
     next_sec = now + 1000;
     /* Start idle if reads can be seen: the page wakes us within a second. */
     active = !atime_ok;
@@ -1303,8 +1933,8 @@ static int run(void)
     vlog("dashd %s: dir %s, bus %s, read detection %s", DASHD_VERSION, cfg.dir, cfg.bus, atime_ok ? "on" : "off (always active)");
 
     while (!stop_flag) {
-        struct pollfd pf[2];
-        int npf = 0, timeout;
+        struct pollfd pf[3 + WS_MAX];
+        int npf = 0, timeout, i, ix_lis = -1, ix_ws[WS_MAX];
         int64_t wake;
 
         now = now_ms();
@@ -1321,12 +1951,32 @@ static int run(void)
         if (active && bus_fd >= 0 && next_gps < wake) wake = next_gps;
         if (child.pid && now + 50 < wake) wake = now + 50;
         if (bus_fd < 0 && next_connect < wake) wake = next_connect;
+        for (i = 0; i < WS_MAX; i++)            /* a handshake gets 3 s */
+            if (wsc[i].fd >= 0 && !wsc[i].open && wsc[i].since + 3000 < wake) wake = wsc[i].since + 3000;
         timeout = wake > now ? (int)(wake - now) : 0;
 
         if (bus_fd >= 0) { pf[npf].fd = bus_fd; pf[npf].events = POLLIN; pf[npf].revents = 0; npf++; }
         if (child.pid)   { pf[npf].fd = child.fd; pf[npf].events = POLLIN; pf[npf].revents = 0; npf++; }
+        if (ws_lfd >= 0) { ix_lis = npf; pf[npf].fd = ws_lfd; pf[npf].events = POLLIN; pf[npf].revents = 0; npf++; }
+        for (i = 0; i < WS_MAX; i++) {
+            ix_ws[i] = -1;
+            if (wsc[i].fd < 0) continue;
+            ix_ws[i] = npf; pf[npf].fd = wsc[i].fd; pf[npf].events = POLLIN; pf[npf].revents = 0; npf++;
+        }
         if (poll(pf, (nfds_t)npf, timeout) < 0 && errno != EINTR) break;
         now = now_ms();
+
+        for (i = 0; i < WS_MAX; i++) {
+            if (ix_ws[i] >= 0 && wsc[i].fd >= 0 && (pf[ix_ws[i]].revents & (POLLIN | POLLHUP | POLLERR))) ws_input(i, now);
+            if (wsc[i].fd >= 0 && !wsc[i].open && now - wsc[i].since >= 3000) ws_drop(i);
+        }
+        if (ix_lis >= 0 && (pf[ix_lis].revents & POLLIN)) ws_accept(now);
+        /* a page that takes the samples pushed reads no file: it counts as
+         * a reader all the same */
+        if (ws_open_count() > 0) {
+            last_reader = now;
+            if (!active) go_active(now);
+        }
 
         if (bus_fd >= 0 && (pf[0].revents & (POLLIN | POLLHUP | POLLERR))) {
             if (bus_read(now) < 0) {
@@ -1354,17 +2004,25 @@ static int run(void)
         }
 
         if (now >= next_sec) {
+            ws_listen(now);
             next_sec += 1000;
             if (next_sec <= now) next_sec = now + 1000;
             pub_hz = pub_count; pub_count = 0;
+            stats_tick(now, 0);
             if (active) {
-                if (atime_ok && now - last_reader > (int64_t)cfg.linger_s * 1000) { active = 0; next_idle = now; vlog("idle"); }
+                if (atime_ok && now - last_reader > (int64_t)cfg.linger_s * 1000) {
+                    active = 0; next_idle = now; vlog("idle");
+                    stats_tick(now, 1);
+                    ws_last_len = 0;    /* old news by the time anyone connects */
+                }
             }
         }
     }
 
     if (child.pid) child_done(0);
+    stats_tick(now_ms(), 2);
     bus_close();
+    ws_close_all();
     unlink(path_out); unlink(path_tmp); unlink(path_pid);
     return 0;
 }
@@ -1566,6 +2224,8 @@ int main(int argc, char **argv)
     if ((e = getenv("DASH_CONF")) && *e)      snprintf(cfg.conf, sizeof cfg.conf, "%s", e);
     if ((e = getenv("DASH_SMDB_READ")) && *e) snprintf(cfg.smdb_read, sizeof cfg.smdb_read, "%s", e);
     if ((e = getenv("DASH_SHM_DIR")) && *e) { snprintf(cfg.shm, sizeof cfg.shm, "%s", e); shm_fixed = 1; }
+    /* where the brake peak and the value ranges are kept; "off": nowhere */
+    if ((e = getenv("DASH_STATS")) && *e) snprintf(stats_path, sizeof stats_path, "%s", strcmp(e, "off") == 0 ? "" : e);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) cfg.verbose = 1;
         else if (argv[i][0] == '-') continue;
@@ -1575,6 +2235,7 @@ int main(int argc, char **argv)
     }
     if (!cmd) cmd = "run";
     conf_load(cfg.conf);
+    if (cfg.stats_off) stats_path[0] = 0;
     snprintf(path_out, sizeof path_out, "%s/dashboard.json", cfg.dir);
     snprintf(path_tmp, sizeof path_tmp, "%s/.dashboard.json.tmp", cfg.dir);
     snprintf(path_pid, sizeof path_pid, "%s/dashboard-daemon.pid", cfg.dir);

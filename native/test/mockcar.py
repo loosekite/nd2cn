@@ -11,6 +11,8 @@ scenarios: idle (standing, engine running), drive, noend (no end marker),
            lateend (vdt values after the end marker), silent (no frames)
 """
 import math
+import os
+import struct
 import sys
 import time
 
@@ -70,6 +72,28 @@ def changed(iface, member, value):
         emit(iface, member, "q", dbus.UInt16(value))
 
 
+# MOCK_SHM: the fake shared memory database. The driver's brake shows in
+# BrakePressure as it does on the car (152 released, rising while pressed;
+# one stray value while released, which must not count as a peak), the yaw
+# rate moves while driving. Written in place: the daemon has it mapped.
+shm = os.environ.get("MOCK_SHM", "")
+shm_off = {}
+if shm:
+    with open(shm, "rb") as f:
+        img = f.read()
+    total, count = struct.unpack_from("<2I", img, 0)
+    for i in range(count):
+        name_off, size, typ, data_off = struct.unpack_from("<4I", img, 16 * (i + 1))
+        shm_off[img[name_off:img.index(b"\0", name_off)].decode()] = data_off
+
+
+def poke(name, v):
+    if name in shm_off:
+        with open(shm, "r+b") as f:
+            f.seek(shm_off[name])
+            f.write(struct.pack("<I", v))
+
+
 def frame():
     n = state["n"]
     state["n"] += 1
@@ -100,9 +124,14 @@ def frame():
     if late:
         for name, v in vdt:
             changed("com.jci.vbs.vdt", name, v)
-    # the driver: brake at 1.5 s for 1 s, a gear at 2 s
-    if n == 15 or n == 25:
-        state["brake"] = 2 if n == 15 else 1
+    if shm:
+        k = n % 30
+        p = 3000 if k == 12 else (152 + 60 * (k - 14) if 15 <= k < 25 else 152)
+        poke("BrakePressure", p)
+        poke("YawRate", 2046 + (int(40 * math.sin(t)) if drive else n % 3 - 1))
+    # the driver: brakes for 1 s every 3 s (from 1.5 s on), a gear at 2 s
+    if n % 30 in (15, 25):
+        state["brake"] = 2 if n % 30 == 15 else 1
         emit("com.jci.vbs.bcm", "BrakePedalDepressedStatus", "y", dbus.Byte(state["brake"]))
     if n == 20 and drive:
         state["gear"] = 3

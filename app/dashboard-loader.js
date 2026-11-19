@@ -21,6 +21,10 @@
  * context (Home, Nav, phone call, reverse camera, ...). The status bar, its
  * notifications and warning pop-ups stay on top (z-index 10+).
  *
+ * The one thing it asks of the unit: the beep a button press makes, when
+ * the dashboard wants it (shift beep), through the framework's own
+ * common.beep().
+ *
  * Nothing here writes to storage. The session state the dashboard hands
  * back (peak g, timer start) is kept in memory until power-off.
  */
@@ -40,6 +44,7 @@
         frame: null,          // the iframe while the dashboard is open
         saved: null,          // session state string from the dashboard
         hooked: false,        // framework hooks installed
+        beepAt: 0,            // when the last beep was asked for
         protoDone: false,
         instDone: false,
         tries: 0
@@ -232,6 +237,17 @@
         } catch (e) {}
     }
 
+    // The unit's own beep, the one a button press makes: it goes the way
+    // every control's does (MMUI, audio settings), is mixed into whatever
+    // plays, and follows the Beep setting in the sound menu. Not more than
+    // four a second, whatever the page asks for.
+    function beep(kind) {
+        var t = new Date().getTime();
+        if (t >= st.beepAt && t - st.beepAt < 250) { return; }
+        st.beepAt = t;
+        try { fw().common.beep(kind, "Touch"); } catch (e) {}
+    }
+
     function open() {
         var f, l;
         if (st.frame) { return; }
@@ -274,6 +290,8 @@
             if (st.saved) { send("init:" + st.saved); }
         } else if (d === "close") {
             close(true);
+        } else if (d === "beep:long" || d === "beep:short") {
+            beep(d === "beep:long" ? "Long" : "Short");
         } else if (d.indexOf("state:") === 0 && d.length < 512) {
             st.saved = d.substring(6);
         }

@@ -14,20 +14,33 @@
     for Chinese), state is carried by thick blocks of colour, and the only
     text on a gauge is the "1g" that names the ring of the friction circle.
 
-    Three views, chosen automatically from the driving state. Each one shows
+    What is shown, and how large, follows from two things. One: the cluster
+    in front of the driver already has a large tachometer, a speedometer and
+    a coolant gauge without figures, so speed and engine speed are small
+    here, and the large places go to what the cluster lacks. Two: only what
+    the car really delivers on this firmware is shown (see "Data" below).
+    The brake pressure is there, but in a unit nobody knows yet: its bar
+    shows it against the highest pressure seen on this car, so a full bar
+    means "as hard as you have ever braked". Outside and intake temperature,
+    fuel level and yaw rate are there too, with scales still unknown: they
+    are only in the calibration panel, as raw numbers, until they are
+    checked against the cluster.
+
+    Two views, chosen automatically from the driving state. Each one shows
     everything its situation needs, so that no input is ever required to find
     a value:
-        STANDBY  standing still (3 s): coolant, huge, with its state in a word
-                 (COLD / WARMING / NORMAL / HOT / OVERHEAT), gear, rpm number
-                 and bar, outside temperature; in the strip the session timer
-                 and the session's peak g
-        STREET   moving: speed, huge, gear, rpm bar; in the strip coolant
-                 (number and colour bar) and outside temperature
+        ROAD     everyday driving, warming up, the pit lane: coolant in
+                 degrees, huge, with its state in a word (COLD / WARMING /
+                 NORMAL / HOT / OVERHEAT), the gear, engine speed and speed
+                 as small figures, the engine speed bar; in the strip the
+                 session timer and the session's peak g
         TRACK    above 0.55 g or 5500 r/min for 0.8 s; left again after 12 s
                  below 0.3 g and 4000 r/min. Friction circle with trail and
                  peak marks, the pedals right beside it (brake red, throttle
-                 green), g now and peak g; speed, gear, rpm bar and number,
-                 coolant; in the strip GPS speed, steering angle, session timer
+                 green), g now and peak g; the engine speed bar (it flashes
+                 at the shift speed), the gear, coolant in degrees with its
+                 word, engine speed and speed small; in the strip GPS speed,
+                 steering angle, session timer
 
     Warnings (oil pressure, charging, coolant above 112 C) take over the
     bottom strip as red blocks in every view and light a red bar along the top
@@ -36,9 +49,12 @@
     lit on any car. Nothing on this page flashes faster than 3 Hz.
 
     Data: /tmp/nd2cn/dashboard.json, written 10 times a second by nd2cn-dashd
-    (or 5 to 6 times by its fallback, dashboard-daemon.sh). Every value may be null, and two of them matter on
-    firmware 74.00.324A: outside temperature has no source there, so
-    "ambient" is always null and its cell stays hidden; coolant is not on
+    (or 5 to 6 times by its fallback, dashboard-daemon.sh). nd2cn-dashd also
+    pushes every sample over a WebSocket on 127.0.0.1 (the port is in the
+    file as "ws"); the page takes that when it can and polls the file
+    otherwise. The page draws 30 frames a second. Every value may be null, and two of them matter on
+    firmware 74.00.324A: "ambient" is always null (the outside temperature
+    the database holds comes raw, as "out"); coolant is not on
     D-Bus and is read from the shared memory database every 2 s. Should that
     fail, coolant shows "--" and no state word, and the over-temperature
     warning cannot fire; everything else carries on. The gear comes as
@@ -50,10 +66,12 @@
     URL options (after #, separated by &):
         demo        synthetic data, no daemon needed (bench testing)
         raw         open the calibration panel at start
-        view=track  start locked in one view (standby | street | track)
+        view=track  start locked in one view (road | track)
         alert       with demo: show the warning blocks
         lang=zh_CN  force the label language (normally taken from the system)
         data=URL    read the JSON from another URL
+        ws=0        poll the file only, even where the daemon pushes
+        conf=URL    read the settings (shift beep) from another file
 
     Controls. Every commander input has one meaning in every state, so it can
     be worked without looking. Touch does the same things.
@@ -64,7 +82,11 @@
         press twice     / double-tap timer     reset timer and peak g (within 0.5 s)
         Back            / tap  <              close
         tilt left-right / tap the status cell calibration panel on / off;
-                          (while automatic)   it only opens standing still
+                          (while automatic)   it only opens standing still;
+                                              opening it sounds the shift beep once
+
+    Shift beep (manual gearbox): one beep of the unit's own, a moment before
+    the engine speed to shift at, see CFG.shiftRpm12 and shiftCheck().
 -->
 <head>
 <meta charset="UTF-8">
@@ -97,9 +119,9 @@ body {
 #app div, #app span, #app canvas { position: absolute; }
 #app span.s, #app span.d, #app span.p, #app span.al { position: static; }
 
-/* which view shows what: vT = track, vS = street, vB = standby */
-#app .vT, #app .vS, #app .vB { display: none; }
-#app.m-track .vT, #app.m-street .vS, #app.m-standby .vB { display: block; }
+/* which view shows what: vT = track, vR = road */
+#app .vT, #app .vR { display: none; }
+#app.m-track .vT, #app.m-road .vR { display: block; }
 
 /* section label. Chinese is set larger than English: a hanzi has more strokes
    than a capital letter and needs the extra pixels at the same distance. */
@@ -122,7 +144,7 @@ body {
 /* Samples stopped arriving (but not yet for long enough to blank the
    screen): what is shown is old, so it loses its white. */
 #app.stale #spdV, #app.stale #rpmV, #app.stale #gearV, #app.stale #coolV,
-#app.stale #gTotV, #app.stale #gpsV, #app.stale #stV, #app.stale #ambV, #app.stale #thrV { color: #7d8083; }
+#app.stale #gTotV, #app.stale #gpsV, #app.stale #stV, #app.stale #thrV { color: #7d8083; }
 
 /* ── friction circle ── */
 #gBg, #gFg { left: 12px; top: 4px; }
@@ -135,39 +157,54 @@ body {
 /* ── pedals: right beside the circle, so that what the feet do and what
       the car does with it are read in one glance ── */
 #ped   { left: 284px; top: 14px; }
-/* throttle in per cent, under the two bars (the brake is a switch: no number) */
+/* throttle in per cent, under the two bars (the brake pressure has no known unit: no number) */
 #thrBox { left: 274px; top: 240px; width: 78px; height: 24px; text-align: center; white-space: nowrap; }
 #thrV   { font-size: 22px; line-height: 24px; }
 #thrBox .unit { font-size: 14px; margin-left: 2px; }
 
-/* ── engine speed bar: top right (track), full width (street), under the
-      rpm number (standby) ── */
+/* What goes where. The instrument cluster in front of the driver already
+   has a large tachometer, a speedometer and a coolant gauge without
+   figures; this screen sits further from the line of sight. So the large
+   places go to what the cluster lacks or only hints at (g, pedals,
+   steering, coolant in degrees, the timer) and to what is read from the
+   corner of the eye (the engine speed bar with its shift flash, the gear).
+   Speed and engine speed are there as small figures, for reference.
+
+   TRACK (the base rules): friction circle and pedals on the left; on the
+   right the engine speed bar across the top, then two columns: the gear
+   (with a manual gearbox the driver knows it: no larger than the rest) over
+   engine speed, and coolant in degrees over speed. */
+
+/* ── engine speed bar: top right (track), under the gear (road) ── */
 #rpm { left: 360px; top: 14px; }
 
-/* ── speed, gear ── */
-#spdL { left: 360px; top: 68px; }
-/* whole km/h large, the tenth small on the same baseline; the unit sits
-   above the tenth, level with the top of the large digits */
-#spdV { left: 360px; top: 90px; width: 262px; height: 120px; text-align: right;
-        font-size: 120px; line-height: 120px; }
-#spdF { font-size: 48px; }
-#spdU { left: 580px; top: 106px; font-size: 20px; }
-#gearBox { left: 644px; top: 72px; width: 140px; height: 142px; background: rgba(255, 255, 255, 0.07); }
-#gearL   { left: 0; top: 7px; width: 140px; text-align: center; text-indent: 2px; }
-#gearV   { left: 0; top: 30px; width: 140px; height: 104px; text-align: center;
-           font-size: 104px; line-height: 104px; font-weight: bold; }
-#gearAcc { left: 0; top: 136px; width: 140px; height: 6px; background: #55585a; }
+/* ── gear ── */
+#gearBox { left: 360px; top: 72px; width: 132px; height: 160px; background: rgba(255, 255, 255, 0.07); }
+#gearL   { left: 0; top: 8px; width: 132px; text-align: center; text-indent: 2px; }
+#gearV   { left: 0; top: 40px; width: 132px; height: 104px; text-align: center;
+           font-size: 88px; line-height: 104px; font-weight: bold; }
+#gearAcc { left: 0; top: 154px; width: 132px; height: 6px; background: #55585a; }
 
-/* ── rpm number, coolant ── */
-#rpmL  { left: 360px; top: 228px; }
-#rpmBox  { left: 360px; top: 254px; width: 200px; height: 56px; white-space: nowrap; }
-#rpmV    { font-size: 52px; line-height: 56px; }
-#coolL { left: 572px; top: 228px; }
-#coolBox { left: 624px; top: 222px; width: 160px; height: 46px; text-align: right; white-space: nowrap; }
-#coolV   { font-size: 40px; line-height: 46px; }
-#coolBox .unit { font-size: 20px; }
-#cool  { left: 572px; top: 278px; }
-#coolS { display: none; }
+/* ── coolant: degrees, the word for it, the bar ── */
+#coolL { left: 512px; top: 72px; }
+#coolS { left: 600px; top: 70px; width: 184px; height: 28px; text-align: right;
+         font-size: 22px; line-height: 28px; font-weight: bold; letter-spacing: 2px; white-space: nowrap; }
+#coolBox { left: 510px; top: 98px; width: 274px; height: 104px; text-align: left; white-space: nowrap; }
+#coolV   { font-size: 96px; line-height: 104px; }
+#coolBox .unit { font-size: 26px; }
+#cool  { left: 512px; top: 206px; }
+.en #coolS { font-size: 20px; letter-spacing: 1px; }     /* "OVERHEAT" beside "COOLANT" */
+
+/* ── engine speed and speed, small: the cluster has both ── */
+#rpmL  { left: 360px; top: 248px; }
+#rpmBox  { left: 360px; top: 274px; width: 140px; height: 50px; white-space: nowrap; }
+#rpmV    { font-size: 44px; line-height: 50px; }
+#rpmBox .unit { display: none; }               /* no room, and the label says it */
+#spdL { left: 512px; top: 248px; }
+/* whole km/h, the tenth smaller on the same baseline */
+#spdV { left: 512px; top: 274px; width: 200px; height: 50px; text-align: left;
+        font-size: 44px; line-height: 50px; }
+#spdF { font-size: 28px; }
 
 /* ── bottom strip ── */
 .cell { top: 336px; height: 80px; }
@@ -181,9 +218,9 @@ body {
 #lockC { left: -2px; top: 41px; display: none; }
 
 /* ── calibration panel (used parked, so it may be denser) ── */
-#raw  { left: 8px; top: 4px; width: 340px; height: 328px; display: none; background: #070a0a; }
+#raw  { left: 8px; top: 4px; width: 340px; height: 330px; display: none; background: #070a0a; }
 #rawT { left: 10px; top: 6px; color: #ffffff; }
-.rr { left: 10px; width: 320px; height: 16px; font-size: 15px; line-height: 16px; }
+.rr { left: 10px; width: 320px; height: 14px; font-size: 14px; line-height: 14px; }
 .rn { left: 0; color: #b4b7ba; white-space: nowrap; }
 .ra { left: 118px; width: 80px; text-align: right; color: #c8c8c8; white-space: nowrap; }
 .rb { left: 202px; width: 118px; text-align: right; color: #ffffff; white-space: nowrap; }
@@ -209,45 +246,29 @@ body {
          text-align: center; font-size: 22px; line-height: 62px; letter-spacing: 2px; white-space: nowrap; }
 #toast.ask { background: #f89c1e; color: #140d02; }
 
-/* ── STREET: speed is the whole screen; coolant and outside temperature
-      sit in the strip ── */
-.m-street #rpm     { left: 20px; }
-.m-street #spdL    { left: 96px; top: 84px; width: 420px; text-align: right; }
-.m-street #spdV    { left: 96px; top: 100px; width: 500px; height: 210px; font-size: 210px; line-height: 210px; }
-.m-street #spdF    { font-size: 84px; }
-.m-street #spdU    { left: 526px; top: 132px; font-size: 24px; }
-.m-street #gearBox { left: 630px; top: 100px; width: 150px; height: 208px; }
-.m-street #gearL   { width: 150px; top: 12px; }
-.m-street #gearV   { width: 150px; top: 42px; height: 154px; font-size: 150px; line-height: 154px; }
-.m-street #gearAcc { width: 150px; top: 202px; }
-.m-street #coolL   { left: 84px; top: 346px; }
-.m-street #coolBox { left: 84px; top: 374px; width: 150px; height: 36px; text-align: left; }
-.m-street #coolV   { font-size: 32px; line-height: 36px; }
-.m-street #coolBox .unit { font-size: 18px; }
-.m-street #cool    { left: 236px; top: 362px; }
-.m-street #ambCell { left: 504px; top: 336px; width: 150px; height: 80px; }
-
-/* ── STANDBY: warming up, pit lane. Two modules of the same build:
-      coolant number over coolant bar, gear and rpm number over rpm bar.
-      The strip holds what one looks at after a session. ── */
-.m-standby #coolL   { left: 44px; top: 24px; }
-.m-standby #coolBox { left: 40px; top: 52px; width: 420px; height: 190px; text-align: left; }
-.m-standby #coolV   { font-size: 180px; line-height: 190px; }
-.m-standby #coolBox .unit { font-size: 32px; margin-left: 10px; }
-.m-standby #cool    { left: 44px; top: 258px; }
-.m-standby #coolS   { display: block; left: 220px; top: 22px; width: 220px; height: 28px; text-align: right;
-                      font-size: 24px; line-height: 28px; font-weight: bold; letter-spacing: 2px; white-space: nowrap; }
-.m-standby #gearBox { left: 480px; top: 24px; width: 132px; height: 212px; }
-.m-standby #gearL   { width: 132px; top: 10px; }
-.m-standby #gearV   { width: 132px; top: 44px; height: 150px; font-size: 140px; line-height: 150px; }
-.m-standby #gearAcc { width: 132px; top: 206px; }
-.m-standby #rpmL    { left: 636px; top: 24px; }
-.m-standby #rpmBox  { left: 634px; top: 50px; width: 150px; }
-.m-standby #rpmBox .unit { display: none; }     /* no room, and the label says it */
-.m-standby #rpm     { left: 480px; top: 258px; }
-.m-standby #ambCell { left: 636px; top: 146px; width: 148px; height: 90px; }
-.m-standby #ambCell .cv { height: 44px; font-size: 40px; line-height: 44px; }
-.m-standby #sesCell { left: 84px; }
+/* ── ROAD: everyday driving, warming up, the pit lane. Coolant in degrees
+      is the one thing here the cluster cannot say, so it is the large
+      figure; the gear beside it, engine speed and speed small, the engine
+      speed bar under them. The strip holds what one looks at after a
+      session. ── */
+.m-road #coolL   { left: 44px; top: 24px; }
+.m-road #coolBox { left: 40px; top: 52px; width: 420px; height: 190px; }
+.m-road #coolV   { font-size: 180px; line-height: 190px; }
+.m-road #coolBox .unit { font-size: 32px; margin-left: 10px; }
+.m-road #cool    { left: 44px; top: 258px; }
+.m-road #coolS   { left: 220px; top: 22px; width: 220px; font-size: 24px; }
+.m-road #gearBox { left: 480px; top: 24px; width: 132px; height: 212px; }
+.m-road #gearL   { width: 132px; top: 10px; }
+.m-road #gearV   { width: 132px; top: 44px; height: 150px; font-size: 140px; line-height: 150px; }
+.m-road #gearAcc { width: 132px; top: 206px; }
+.m-road #rpmL    { left: 636px; top: 24px; }
+.m-road #rpmBox  { left: 634px; top: 50px; width: 150px; height: 56px; }
+.m-road #rpmV    { font-size: 52px; line-height: 56px; }
+.m-road #spdL    { left: 636px; top: 134px; }
+.m-road #spdV    { left: 634px; top: 160px; width: 150px; height: 56px; font-size: 52px; line-height: 56px; }
+.m-road #spdF    { font-size: 32px; }
+.m-road #rpm     { left: 480px; top: 258px; }
+.m-road #sesCell { left: 84px; }
 </style>
 </head>
 <body>
@@ -265,10 +286,9 @@ body {
     <!-- ── engine speed bar (every view) ── -->
     <canvas id="rpm" width="424" height="44"></canvas>
 
-    <!-- ── speed, gear, pedals ── -->
-    <div id="spdL" class="lb vT vS" data-l="speed"></div>
-    <div id="spdV" class="num vT vS"><span id="spdI" class="s"></span><span id="spdF" class="s"></span></div>
-    <span id="spdU" class="unit vT vS">km/h</span>
+    <!-- ── speed (small), gear, pedals ── -->
+    <div id="spdL" class="lb" data-l="speed"></div>
+    <div id="spdV" class="num"><span id="spdI" class="s"></span><span id="spdF" class="s"></span></div>
 
     <div id="gearBox">
         <div id="gearL" class="lb" data-l="gear"></div>
@@ -280,8 +300,8 @@ body {
     <div id="thrBox" class="vT"><span id="thrV" class="num s"></span><span class="unit s">%</span></div>
 
     <!-- ── rpm number, coolant ── -->
-    <div id="rpmL" class="lb vT vB" data-l="rpm"></div>
-    <div id="rpmBox" class="vT vB"><span id="rpmV" class="num s"></span><span class="unit s">r/min</span></div>
+    <div id="rpmL" class="lb" data-l="rpm"></div>
+    <div id="rpmBox"><span id="rpmV" class="num s"></span><span class="unit s">r/min</span></div>
 
     <div id="coolL" class="lb" data-l="cool"></div>
     <div id="coolS"></div>
@@ -296,18 +316,18 @@ body {
         <div class="cv"><span id="gpsV" class="num s"></span><span class="unit s">km/h</span></div>
     </div>
 
-    <div class="cell vT" style="left:296px;width:196px">
+    <div class="cell vT" id="stBox" style="left:296px;width:196px;visibility:hidden">
         <div class="lb cl" data-l="steer"></div>
         <div class="cv"><span id="stV" class="num s"></span></div>
         <canvas id="stC" width="96" height="24" style="left:100px;top:10px"></canvas>
     </div>
 
-    <div class="cell vT vB" id="sesCell">
+    <div class="cell" id="sesCell">
         <div class="lb cl" data-l="ses"></div>
         <div class="cv"><span id="sesV" class="num s"></span></div>
     </div>
 
-    <div class="cell vB" style="left:296px;width:196px">
+    <div class="cell vR" style="left:296px;width:196px">
         <div class="lb cl" data-l="peakg"></div>
         <div class="cv"><span id="pkV" class="num s"></span><span class="unit s">g</span></div>
     </div>
@@ -319,12 +339,6 @@ body {
         <div id="stSub"></div>
     </div>
 
-    <!-- ── outside temperature (street: strip, standby: beside the gear) ── -->
-    <div id="ambCell" class="vS vB">
-        <div class="lb cl" data-l="amb"></div>
-        <div class="cv"><span id="ambV" class="num s"></span><span class="unit s">&deg;C</span></div>
-    </div>
-
     <div id="fade"></div>
 
     <div id="alTop"></div>
@@ -333,7 +347,7 @@ body {
     <!-- ── calibration panel (hidden) ── -->
     <div id="raw">
         <div class="lb" id="rawT" data-l="raw"></div>
-        <div id="rawRows" style="left:0;top:34px;width:340px;height:290px"></div>
+        <div id="rawRows" style="left:0;top:34px;width:340px;height:296px"></div>
     </div>
 
     <div id="toast"></div>
@@ -349,6 +363,7 @@ body {
     var CFG = {
         dataUrl:    "file:///tmp/nd2cn/dashboard.json",
         pollMs:     40,      // data poll period (the car sends 10 frames a second)
+        ws:         true,    // take the samples the native daemon pushes (WebSocket); "#ws=0": poll only
         softMs:     600,     // no new sample for this long -> values turn grey
         staleMs:    2000,    // ... and for this long -> OFFLINE, values blank
 
@@ -356,10 +371,44 @@ body {
         rpmAmber:   6000,    // blocks from here up are amber
         rpmRed:     7000,    // blocks from here up are red
         rpmWarn:    6500,    // the whole bar turns amber
-        rpmRedline: 7500,    // ND2 2.0 redline: the whole bar flashes red
+                             // (the whole bar flashes red at the shift speed, below)
         rpmFlashMs: 170,     // half period of that flash. Keeps it under three
                              // flashes a second, the limit for large flashing
                              // areas (and for red in particular)
+
+        // Shift beep (manual gearbox). On the ND2 2.0 a gear pulls harder
+        // than the next one all the way to its limiter (wheel torque from a
+        // stock car's dyno run times the gear ratios: 1.04 to 1.4 times at
+        // the limiter), so the speed to shift at is the limiter less a
+        // margin, not a point on the torque curve. The limiter is 7500 r/min
+        // in 1st and 2nd and 7200 from 3rd up (Mazda, via Flyin' Miata;
+        // actual engine speed, which is what the car reports here; the
+        // needle may read 300 more up there).
+        // The beep comes early by shiftLeadMs, counted in engine speed at the
+        // rate it is climbing: flat out in 1st (2300 r/min a second) that is
+        // 1000 r/min early, in 4th 70. /data/nd2cn/dashboard.conf may set
+        // SHIFT_BEEP (long | short | off), SHIFT_RPM_12, SHIFT_RPM,
+        // SHIFT_LEAD_MS, SHIFT_COLD_C (0 = off) and SHIFT_COLD_RPM.
+        shiftTone:    "long",  // which of the unit's two beeps; "off": none
+        shiftRpm12:   7400,    // shift speed in 1st and 2nd
+        shiftRpm:     7100,    // ... from 3rd up, and where the bar flashes when the gear is not known
+        shiftLeadMs:  450,     // reaction time, and the way here
+        shiftColdC:   60,      // coolant below this:
+        shiftColdRpm: 4500,    // ... beep here instead (the bar does not flash)
+        confUrl:    "file:///data/nd2cn/dashboard.conf",
+
+        // Brake pressure (nd2cn-dashd "brake_p": BrakePressure from the
+        // database, unit unknown). Zero is what it reads released ("brake_p0",
+        // 152 on the car); a full bar is the highest pressure ever held on
+        // this car ("brake_pmax", kept by the daemon across power-off), and
+        // at least brakeSpan above zero, so that the first drives do not
+        // fill it with every light touch (the car: a firm press, not full
+        // force, read 393, i.e. 241 above zero). BRAKE_FULL in
+        // /data/nd2cn/dashboard.conf fixes the full bar at a raw value.
+        brakeZero:  152,     // zero until the daemon has learnt it
+        brakeSpan:  400,     // smallest full bar, above zero
+        brakeDead:  6,       // noise of the released pedal (149..153 seen)
+        brakeFull:  0,       // BRAKE_FULL; 0: learnt
 
         gRing:      1.25,    // g at the outer ring
         gClamp:     1.30,    // the dot never leaves the plate
@@ -383,14 +432,11 @@ body {
         // screen, so it must not happen in ordinary traffic: a firm stop at
         // a light reaches 0.4 g and a motorway slip road 5000 r/min, hence
         // the thresholds sit above both and must hold for a moment.
-        moveKmh:      5,     // above: STREET (back to STANDBY below stopKmh)
-        stopKmh:      3,
+        moveKmh:      5,     // moving: the calibration panel does not open
         trackG:       0.55,  // combined g that enters TRACK
         trackRpm:     5500,  // ... or this engine speed
         trackStayG:   0.3,   // lower thresholds that keep TRACK once entered
         trackStayRpm: 4000,
-        streetMs:     500,   // moving this long          -> STREET
-        standbyMs:    3000,  // standing this long        -> STANDBY (not at every stop line)
         trackEnterMs: 800,   // above the thresholds      -> TRACK
         trackExitMs:  12000, // below the stay thresholds -> leave TRACK; long,
                              // so the layout does not flip in a slow corner
@@ -424,6 +470,8 @@ body {
             else if (kv[0] === "view" && kv[1]) { OPT.view = kv[1]; }
             else if (kv[0] === "alert") { OPT.alert = true; }
             else if (kv[0] === "data" && kv[1]) { CFG.dataUrl = decodeURIComponent(kv.slice(1).join("=")); }
+            else if (kv[0] === "ws" && kv[1] === "0") { CFG.ws = false; }
+            else if (kv[0] === "conf" && kv[1]) { CFG.confUrl = decodeURIComponent(kv.slice(1).join("=")); }
         }
     })();
 
@@ -443,30 +491,32 @@ body {
     var ZH = lang === "zh_CN";
     var LABELS = ZH ? {
         speed: "车速", gear: "挡位", rpm: "转速", cool: "水温", max: "峰值", peakg: "峰值 G",
-        gps: "GPS 车速", steer: "转向角", ses: "计时", amb: "车外温度", raw: "校准"
+        gps: "GPS 车速", steer: "转向角", ses: "计时", raw: "校准"
     } : {
         speed: "SPEED", gear: "GEAR", rpm: "RPM", cool: "COOLANT", max: "PEAK", peakg: "PEAK G",
-        gps: "GPS SPEED", steer: "STEER", ses: "SESSION", amb: "OUTSIDE", raw: "CALIBRATION"
+        gps: "GPS SPEED", steer: "STEER", ses: "SESSION", raw: "CALIBRATION"
     };
     // The status cell is 114 px wide: at most 7 capitals or 5 hanzi per line.
     var TXT = ZH ? {
         demo: "演示", waking: "唤醒中", stale: "无数据",
         conn: "连接中", off: "离线", reset: "已重置", auto: "自动", manual: "手动",
-        again: "再按一次重置", parked: "请先停车",
-        modes: { standby: "待机", street: "公路", track: "赛道" },
+        again: "再按一次重置", parked: "请先停车", push: "推送", poll: "轮询",
+        modes: { road: "公路", track: "赛道" },
         oil: "油压低", batt: "充电故障", temp: "水温",
         cool: ["冷车", "暖机中", "正常", "偏高", "过热"],
         rows: ["转速", "油门", "转向", "横向 G", "纵向 G", "水温", "车速 VSS", "车速 BCM", "前轮 左 / 右", "后轮 左 / 右",
-               "挡位 MT", "挡杆 AT", "制动", "GPS 车速", "GPS 航向", "油压 / 充电", "序号 / 频率", "信号 / 延迟"]
+               "挡位 MT", "挡杆 AT", "制动 油压 / 开关", "制动 零点 / 最大", "进气 / 车外", "油量 / 横摆",
+               "GPS 车速", "GPS 航向", "油压 / 充电", "序号 / 频率", "信号 / 延迟"]
     } : {
         demo: "DEMO", waking: "WAKING", stale: "NO DATA",
         conn: "WAIT", off: "OFFLINE", reset: "RESET DONE", auto: "AUTO", manual: "MANUAL",
-        again: "AGAIN TO RESET", parked: "PARKED ONLY",
-        modes: { standby: "STANDBY", street: "STREET", track: "TRACK" },
+        again: "AGAIN TO RESET", parked: "PARKED ONLY", push: "PUSH", poll: "POLL",
+        modes: { road: "ROAD", track: "TRACK" },
         oil: "OIL", batt: "BATT", temp: "TEMP",
         cool: ["COLD", "WARMING", "NORMAL", "HOT", "OVERHEAT"],
         rows: ["RPM", "THROTTLE", "STEERING", "LAT G", "LON G", "COOLANT", "SPEED VSS", "SPEED BCM", "FRONT L / R", "REAR L / R",
-               "GEAR MT", "LEVER AT", "BRAKE", "GPS SPEED", "GPS HEADING", "OIL / CHARGE", "SEQ / RATE", "SIGNALS / AGE"]
+               "GEAR MT", "LEVER AT", "BRAKE P / SW", "BRAKE 0 / MAX", "INTAKE / OUT", "FUEL / YAW",
+               "GPS SPEED", "GPS HEADING", "OIL / CHARGE", "SEQ / RATE", "SIGNALS / AGE"]
     };
 
     // ─────────────────────────────────────────────────────────────
@@ -536,12 +586,13 @@ body {
     // ─────────────────────────────────────────────────────────────
     // Sample store and playback
     //
-    // The car delivers 10 samples a second and the screen draws 35 to 60
+    // The car delivers 10 samples a second and the screen draws 30
     // frames. Everything that moves (bars, the dot, the numbers) is played
     // back a little behind the data: the two samples on either side of
     // "now - S.delay" are known, and each frame shows the point between
     // them. Even motion costs that delay: one sample period (0.1 s) plus
-    // the time a sample takes to get here (up to one poll period). Showing
+    // the time a sample takes to get here (pushed: until this page's thread
+    // is free, up to one frame; polled: up to one poll period more). Showing
     // every sample at once would save it and move in ten jumps a second.
     // What must not wait does not: the gear, the colours, the warnings and
     // the peaks come from the newest sample (S.cur).
@@ -552,19 +603,20 @@ body {
     // stopping and catching up. The shell daemon sends no stamp; its samples
     // are placed where they arrive.
     // ─────────────────────────────────────────────────────────────
-    var FIELDS = ["speed", "rpm", "throttle", "brake", "steering", "lat_g", "lon_g", "coolant", "ambient", "gps_speed"];
+    var FIELDS = ["speed", "rpm", "throttle", "brake", "steering", "lat_g", "lon_g", "coolant", "gps_speed"];
     var S = {
         hist: [],         // the last samples (up to 16), oldest first; .at = their time on this page's clock
         cur: null,        // newest sample
         tCur: 0,          // arrival time of cur
         per: 100,         // time between two samples, smoothed
-        late: CFG.pollMs, // how long after "one period past the sample before" a sample turns up (recent worst)
+        late: CFG.pollMs, // how much longer than the quickest one a sample's trip here takes (recent worst)
         delay: 105 + CFG.pollMs,  // how far behind the playback runs: per + late + a little
         off: null,        // this page's clock minus the daemon's (smallest difference seen)
         dw: [],           // the last 10 differences, to notice when that one is out of date
         lastText: "",
         lastChange: 0,    // last time the file content changed
         okSince: 0,
+        rx: 0, rxN: 0, rxT: 0,  // samples received in the last second (calibration panel)
         obj: null         // newest parsed object (calibration panel)
     };
     var T0 = Date.now();
@@ -596,14 +648,111 @@ body {
         }
         return out;
     }
+    // ── Shift beep ──
+    // Where to shift in this gear: see CFG.shiftRpm12. Also where the bar
+    // starts to flash.
+    function shiftRpm(c) {
+        var g = c ? Number(c.gear) : 0;
+        return (g === 1 || g === 2) ? CFG.shiftRpm12 : CFG.shiftRpm;
+    }
+    function beep() {
+        if (CFG.shiftTone === "long" || CFG.shiftTone === "short") { post("beep:" + CFG.shiftTone); }
+    }
+    var SH = { armed: true, rpm: 0, gear: null, n: 0 };
+    // c: the new sample; h: the ones before it
+    function shiftCheck(c, h) {
+        var g = Number(c.gear), target, i, p = null, rate = 0, pred;
+        if (c.idle || c.rpm === null) { return; }
+        // Once it has beeped: again only in another gear, or after the engine
+        // speed has come down from the highest it reached since (a lift), not
+        // while it sits at the limiter.
+        if (!SH.armed) {
+            if (c.rpm > SH.rpm) { SH.rpm = c.rpm; }
+            if ((g >= 1 && g !== SH.gear) || c.rpm < SH.rpm - 400) { SH.armed = true; } else { return; }
+        }
+        target = shiftRpm(c);
+        if (CFG.shiftColdC && c.coolant !== null && c.coolant < CFG.shiftColdC && CFG.shiftColdRpm < target) { target = CFG.shiftColdRpm; }
+        // how fast it climbs: against the sample 150 to 400 ms back (one
+        // sample apart, a step of the car's own rounding would count double)
+        for (i = h.length - 1; i >= 0; i--) {
+            if (c.at - h[i].at >= 150) { p = h[i]; break; }
+        }
+        // (in the same gear only: a shift down jumps the engine speed)
+        if (p && p.rpm !== null && c.at - p.at <= 400 && g >= 1 && Number(p.gear) === g) {
+            for (i = i + 1; i < h.length && Number(h[i].gear) === g; i++) {}
+            if (i === h.length) { rate = (c.rpm - p.rpm) / (c.at - p.at) * 1000; }
+        }
+        // (limited: a slipping clutch or spinning wheels must not make it
+        // beep 2000 r/min early)
+        pred = c.rpm + clamp(rate, 0, 4000) * CFG.shiftLeadMs / 1000;
+        if (pred < target) { return; }
+        // Only when a shift up is what comes next: a manual gearbox in 1st
+        // to 5th, moving, on the throttle, off the brake. (Braking into a
+        // corner the engine speed jumps with every shift down; in neutral
+        // or with the clutch down the car reports no gear.)
+        if (c.gearbox === "at" || !(g >= 1 && g <= 5) || c.speed === null || c.speed < 10) { return; }
+        if (c.brakeOn === true || (c.throttle !== null && c.throttle < 30)) { return; }
+        SH.armed = false; SH.rpm = c.rpm; SH.gear = g; SH.n++;
+        beep();
+    }
+    // The settings file is the daemon's (plain KEY=value lines); the keys
+    // for this page are read here. No file: the defaults.
+    function loadConf() {
+        var xhr;
+        function num1(v, lo, hi) { var n = Number(v); return (/^[0-9]+$/.test(v) && n >= lo && n <= hi) ? n : null; }
+        function parse(text) {
+            var lines = String(text).split(/\r?\n/), i, m, k, v, n;
+            for (i = 0; i < lines.length; i++) {
+                m = /^\s*(SHIFT_[A-Z0-9_]+|BRAKE_FULL)=["']?([A-Za-z0-9]*)["']?\s*(#.*)?$/.exec(lines[i]);
+                if (!m) { continue; }
+                k = m[1]; v = m[2];
+                if (k === "SHIFT_BEEP") { if (v === "long" || v === "short" || v === "off") { CFG.shiftTone = v; } }
+                else if (k === "SHIFT_RPM_12") { n = num1(v, 3000, 8000); if (n !== null) { CFG.shiftRpm12 = n; } }
+                else if (k === "SHIFT_RPM") { n = num1(v, 3000, 8000); if (n !== null) { CFG.shiftRpm = n; } }
+                else if (k === "SHIFT_LEAD_MS") { n = num1(v, 0, 1500); if (n !== null) { CFG.shiftLeadMs = n; } }
+                else if (k === "SHIFT_COLD_C") { n = num1(v, 0, 100); if (n !== null) { CFG.shiftColdC = n; } }
+                else if (k === "SHIFT_COLD_RPM") { n = num1(v, 2000, 8000); if (n !== null) { CFG.shiftColdRpm = n; } }
+                else if (k === "BRAKE_FULL") { n = num1(v, 0, 65534); if (n !== null) { CFG.brakeFull = n; } }
+            }
+        }
+        try {
+            xhr = new XMLHttpRequest();
+            xhr.open("GET", CFG.confUrl, true);
+            if (xhr.overrideMimeType) { xhr.overrideMimeType("text/plain; charset=utf-8"); }
+            xhr.onreadystatechange = function () {
+                var t = "";
+                if (xhr.readyState !== 4) { return; }
+                try { t = xhr.responseText || ""; } catch (e) {}
+                if ((xhr.status === 200 || xhr.status === 0) && t) { parse(t); }
+            };
+            xhr.send(null);
+        } catch (e) {}
+    }
+
     function onSample(o, now) {
-        var c = blank(), h = S.hist, i, br, t, d, mw, at, last, gap;
+        var c = blank(), h = S.hist, i, br, p, p0, full, t = num(o.t), d, mw, at, last, gap, sq, lag = null, n;
+        // Older than the one shown: a read of the file that was under way
+        // when the same sample, and the next one, came pushed. ("t" runs on
+        // a clock that never goes back, not even when the daemon restarts.)
+        if (t !== null && S.cur && S.cur.t !== null && t <= S.cur.t && S.cur.t - t < 2000) { return; }
         for (i = 0; i < FIELDS.length; i++) { c[FIELDS[i]] = num(o[FIELDS[i]]); }
-        // BCM GetBrkPedalDepressedStatus is an on/off switch, not a pressure
-        // (seen on the car): 1 = released, 2 = depressed. Anything else
-        // (0 before the BCM has reported, out-of-range values) is no data.
+        // BCM GetBrkPedalDepressedStatus is an on/off switch (seen on the
+        // car): 1 = released, 2 = depressed. Anything else (0 before the BCM
+        // has reported, out-of-range values) is no data. The bar is the
+        // pressure where the daemon has it, else the switch (full or empty).
+        // The switch has the last word: released is an empty bar (a stray
+        // pressure value must not flash it), pressed at least a sliver.
         br = c.brake;
+        c.brakeOn = br === 2 ? true : (br === 1 ? false : null);
         c.brake = br === 2 ? 100 : (br === 1 ? 0 : null);
+        p = num(o.brake_p);
+        if (p !== null && c.brakeOn !== null) {
+            p0 = num(o.brake_p0);
+            if (p0 === null) { p0 = CFG.brakeZero; }
+            p0 += CFG.brakeDead;
+            full = CFG.brakeFull > p0 ? CFG.brakeFull : Math.max(p0 + CFG.brakeSpan, num(o.brake_pmax) || 0);
+            c.brake = c.brakeOn ? clamp((p - p0) / (full - p0) * 100, 4, 100) : 0;
+        }
         if (c.throttle !== null) { c.throttle = clamp(c.throttle, 0, 100); }
         c.idle = o.idle === true;
         c.gear = o.gear;
@@ -614,7 +763,6 @@ body {
 
         // after a pause (or a clock that jumped) the old samples say nothing about this one
         if (c.idle || now - S.tCur > 1000 || now < S.tCur) { h.length = 0; }
-        t = num(o.t);
         if (t !== null) {
             // The difference of the two clocks, plus the trip here. The
             // smallest one seen is the trip at its quickest, i.e. the true
@@ -631,13 +779,19 @@ body {
             else if (d < S.off) { S.off = d; }
             else if (S.dw.length === 10 && mw > S.off + 20) { S.off = mw; }
             at = t + S.off;
+            lag = d - S.off;          // how much longer than the quickest one this trip took
         } else {
             at = now;
         }
+        sq = num(o.seq);
         last = h.length ? h[h.length - 1] : null;
         if (last) {
             if (at <= last.at) { at = last.at + 1; }
-            gap = at - last.at;
+            // A sample this page never saw (the file was replaced twice
+            // between two reads) leaves a gap of two periods, not a longer
+            // period: the sequence numbers tell how many it spans.
+            n = (sq !== null && last.seq !== null && sq > last.seq && sq - last.seq <= 5) ? sq - last.seq : 1;
+            gap = (at - last.at) / n;
             // Only the steady rhythm counts: frames come every 100 ms (the
             // shell daemon: 150 to 250 ms). A brake or gear change is sent at
             // once, between two frames; with the bus silent the daemon still
@@ -645,15 +799,32 @@ body {
             // that came late.
             if (gap > 50 && gap < 300) {
                 S.per = clamp(S.per + (gap - S.per) * 0.1, 60, 300);
-                // The playback needs this sample by the time it has shown the
-                // one before, i.e. S.per + S.late after that one. Keep the
-                // recent worst case; one late frame may stall the motion for a
-                // moment but must not make everything late for good, hence
-                // the limit.
-                S.late = clamp(Math.max(S.late - 0.5, now - last.at - S.per), 0, S.per * 0.8);
+                // The playback reaches a sample's time one period after the
+                // one before it, at the earliest; it needs the sample by then,
+                // so it runs S.per + S.late behind. Keep the recent worst case;
+                // one late frame may stall the motion for a moment but must
+                // not make everything late for good, hence the limit. (No
+                // stamp: how far after one period past the sample before.)
+                S.late = clamp(Math.max(S.late - 0.5, lag !== null ? lag : now - last.at - S.per), 0, S.per * 0.8);
             }
         }
+        // samples per second, counted over whole seconds (one step each, so
+        // that the jitter of arrival does not move the boundary)
+        if (now - S.rxT >= 1000 || now < S.rxT) {
+            S.rx = S.rxN; S.rxN = 0;
+            S.rxT = (now - S.rxT < 2000 && now >= S.rxT) ? S.rxT + 1000 : now;
+        }
+        S.rxN++;
+        // where the push is: a sample without "ws" comes from the shell
+        // daemon, "ws":0 from a native one with the push switched off
+        if (!c.idle) {
+            WS.port = (CFG.ws && typeof o.ws === "number" && o.ws > 0 && o.ws < 65536) ? o.ws : 0;
+            WS.key = typeof o.wsk === "string" ? o.wsk : "";
+        }
+        c.seq = sq;
+        c.t = t;
         c.at = at;
+        shiftCheck(c, h);
         h.push(c);
         if (h.length > 16) { h.shift(); }
 
@@ -677,6 +848,8 @@ body {
     var X = { fails: 0, bust: true, n: 0 };
     function poll() {
         var xhr = null, done = false, started = Date.now(), guard;
+        wsCheck(started);
+        if (WS.live) { setTimeout(poll, 250); return; }     // the samples are pushed: no reads
         function finish(ok, text) {
             var now, wait;
             if (done) { return; }
@@ -720,6 +893,58 @@ body {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Data source, preferred: the native daemon pushes every sample over a
+    // WebSocket on 127.0.0.1, the port it names in the file ("ws"). Polled,
+    // a sample waited for the next read, and the read for the frame being
+    // drawn: on the car 70 to 100 ms, uneven, and the playback had to run
+    // 200 to 240 ms behind. Pushed, it waits for the frame only. The poll
+    // stays as the fallback (shell daemon, no WebSocket, connection lost)
+    // and pauses while the push delivers.
+    // ─────────────────────────────────────────────────────────────
+    var WS = { port: 0, key: "", sock: null, live: false, got: 0, started: 0, next: 0, wait: 2000 };
+    function wsTry(now) {
+        var s;
+        // (a retry is never more than a minute away: one further off was
+        // moved along with a clock change it was made after)
+        if (WS.next > now + 60000) { WS.next = now; }
+        if (!CFG.ws || OPT.demo || WS.sock || !WS.port || !W.WebSocket || now < WS.next) { return; }
+        // the key ("wsk") is only in the file: what lets this page in and
+        // keeps a web page out (see the daemon)
+        try { s = new W.WebSocket("ws://127.0.0.1:" + WS.port + "/?k=" + WS.key); } catch (e) { s = null; }
+        WS.sock = s; WS.live = false; WS.started = now;
+        if (!s) { wsDrop(now); return; }
+        s.onmessage = function (e) {
+            var t = Date.now();
+            if (WS.sock !== s) { return; }
+            WS.got = t;
+            if (!WS.live) { WS.live = true; WS.wait = 2000; }
+            onText(String(e.data), t);
+        };
+        s.onclose = s.onerror = function () { if (WS.sock === s) { wsDrop(Date.now()); } };
+    }
+    // Gone, or never came up: back to polling, and try again later; when it
+    // failed without delivering anything, each time twice as late (to 1 min).
+    function wsDrop(now) {
+        var s = WS.sock;
+        WS.sock = null;
+        if (s) {
+            s.onmessage = s.onclose = s.onerror = null;
+            try { s.close(); } catch (e) {}
+        }
+        WS.next = now + WS.wait;
+        if (!WS.live) { WS.wait = Math.min(WS.wait * 2, 60000); }
+        WS.live = false;
+    }
+    // From the poll loop. The daemon pushes at least twice a second: a
+    // connection that stays silent longer, or never delivers, is given up.
+    function wsCheck(now) {
+        if (WS.sock && (WS.live ? (now - WS.got > 1200 || now < WS.got) : (now - WS.started > 3000 || now < WS.started))) {
+            wsDrop(now);
+        }
+        wsTry(now);
+    }
+
     // Synthetic lap for bench testing (#demo)
     function demoTick() {
         var t = (Date.now() - T0) / 1000, o = {}, lat, lon, spd, g, rpm, ratios;
@@ -737,20 +962,22 @@ body {
         o.gear = g; o.lever = 1; o.gearbox = "mt";
         o.throttle = lon > 0 ? Math.round(clamp(lon * 190, 0, 100) * 10) / 10 : 0;
         o.brake = lon < -0.18 ? 2 : 1;                         // BCM encoding: 1 released, 2 depressed
+        o.brake_p = o.brake === 2 ? Math.round(152 + (-lon - 0.1) * 1300) : 151 + Math.round(Math.random() * 2);
+        o.brake_p0 = 152; o.brake_pmax = 1050;
         o.steering = Math.round(lat * 420) / 10;
         o.lat_g = Math.round(lat * 1000) / 1000;
         o.lon_g = Math.round(lon * 1000) / 1000;
         o.coolant = Math.round(93 + 5 * Math.sin(t * 0.07));
         o.gps_speed = Math.round((spd - 0.6) * 10) / 10;
         o.gps_fix = 1; o.gps_lat = 31.2304; o.gps_lon = 121.474; o.gps_heading = Math.round((t * 12) % 360 * 10) / 10;
-        o.ambient = 24.5;
         o.oil_warn = OPT.alert ? 1 : 0; o.batt_warn = OPT.alert ? 1 : 0;
         o.hz = 10; o.sig = Math.round(t * 60); o.src = "native"; o.smdb = "direct";
         o.wheels = [o.speed - 0.4, o.speed + 0.3, o.speed - 0.1, o.speed + 0.2];
         // raw numbers as the car sends them: unsigned, 0 g = 4000, wheel centre = 16000
         o.raw = { rpm: Math.round(rpm / 2), thr: Math.round(o.throttle * 10), steer: Math.round(o.steering * 10) + 16000,
                   latg: Math.round(lat / 0.00102) + 4000, lon: Math.round(lon / 0.00102) + 4000,
-                  cool: o.coolant + 40, vss: Math.round(spd * 100), spd: Math.round(spd * 100) + 10000, gear: g, lever: 1 };
+                  cool: o.coolant + 40, vss: Math.round(spd * 100), spd: Math.round(spd * 100) + 10000, gear: g, lever: 1,
+                  brkp: o.brake_p, yaw: 2047 + Math.round(lat * 60), iat: 66, out: 64, fuel: 100 };
         setTimeout(function () { onSample(o, Date.now()); }, Math.random() * CFG.pollMs);
         setTimeout(demoTick, 100);
     }
@@ -835,7 +1062,7 @@ body {
         if (p && p.length === 5 && isNum(p[0]) && isNum(p[1]) && isNum(p[2]) && isNum(p[3]) && isNum(p[4])) {
             PK.l = p[0]; PK.r = p[1]; PK.t = p[2]; PK.b = p[3]; PK.tot = p[4]; PK.ver++;
         }
-        if (o.m === "standby" || o.m === "street" || o.m === "track") { M.lock = true; setMode(o.m); }
+        if (o.m === "road" || o.m === "track") { M.lock = true; setMode(o.m); }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -850,7 +1077,7 @@ body {
     var TRAIL_N = 160;
     var trail = { x: [], y: [], t: [], head: 0, n: 0, lastT: 0, lx: -99, ly: -99 };
     var gState = { clean: false, dx: -99, dy: -99 };
-    var quality = 2;                          // 2: glow, 1: plain trail, 0: plain trail at 30 fps
+    var quality = 2;                          // 2: glow, 1: plain trail, 0: plain trail at 15 fps
 
     function ring(c, g) {
         c.beginPath();
@@ -1007,7 +1234,7 @@ body {
 
     function drawRpm(now) {
         var c = rpmCtx, rpm = shown.rpm, per = CFG.rpmMax / RPM_SEG, pitch = RPM_W / RPM_SEG;
-        var zone = rpm >= CFG.rpmRedline ? 2 : (rpm >= CFG.rpmWarn ? 1 : 0);
+        var zone = rpm >= shiftRpm(live ? S.cur : null) ? 2 : (rpm >= CFG.rpmWarn ? 1 : 0);
         var flash = zone === 2 ? (Math.floor(now / CFG.rpmFlashMs) % 2) : 0;
         var key = Math.round(rpm / CFG.rpmMax * RPM_W * 2) + "/" + zone + "/" + flash;
         var i, x, lo, f, lit;
@@ -1058,7 +1285,7 @@ body {
 
     // One solid colour for the whole lit block: blue = not warm yet, green =
     // normal, amber = hot, blinking red = too hot. The colour is the message;
-    // in STANDBY the same state is also spelled out next to the label.
+    // the same state is also spelled out next to the label.
     var coolCtx = $("cool").getContext("2d"), coolKey = "";
     var COOL_W = 212, COOL_H = 26;                             // size follows the view, see setMode()
     function coolX(t) { return (clamp(t, CFG.coolMin, CFG.coolMax) - CFG.coolMin) / (CFG.coolMax - CFG.coolMin) * COOL_W; }
@@ -1118,16 +1345,17 @@ body {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Views: STANDBY / STREET / TRACK. Chosen from the newest sample with
-    // hysteresis; the commander can lock one.
+    // Views: ROAD / TRACK. Chosen from the newest sample with hysteresis;
+    // the commander can lock one. (There were three: a standing view, and a
+    // street view that was one huge speed figure, which the speedometer in
+    // front of the driver does better.)
     // ─────────────────────────────────────────────────────────────
-    var MODES = ["standby", "street", "track"];
+    var MODES = ["road", "track"];
     var SIZES = {                              // canvas sizes per view: [rpm w, rpm h, coolant w, coolant h]
-        standby: [304, 44, 396, 44],
-        street:  [760, 56, 220, 28],
-        track:   [424, 44, 212, 26]
+        road:  [304, 44, 396, 44],
+        track: [424, 44, 272, 26]
     };
-    var M = { mode: "", lock: false, since: 0, want: "" };
+    var M = { mode: "", lock: false, since: 0 };
     var FX = { until: 0, el: $("fade") };      // dip to dark on a view change
     var app = $("app");
 
@@ -1161,25 +1389,17 @@ body {
     function wantedMode(c) {
         var inTrack = M.mode === "track";
         var g = inTrack ? CFG.trackStayG : CFG.trackG, r = inTrack ? CFG.trackStayRpm : CFG.trackRpm;
-        var spd = c.speed === null ? 0 : c.speed;
         var la = c.lat_g === null ? 0 : c.lat_g, lo = c.lon_g === null ? 0 : c.lon_g;
         var m = Math.sqrt(la * la + lo * lo);
-        if ((m > g && m <= CFG.gSane) || (c.rpm !== null && c.rpm > r)) { return "track"; }
-        if (M.mode === "standby") { return spd > CFG.moveKmh ? "street" : "standby"; }
-        return spd < CFG.stopKmh ? "standby" : "street";
+        return ((m > g && m <= CFG.gSane) || (c.rpm !== null && c.rpm > r)) ? "track" : "road";
     }
     function autoMode(now) {
         var w, hold;
         if (M.lock || !live || stale || !S.cur) { M.since = 0; return; }
         w = wantedMode(S.cur);
         if (w === M.mode) { M.since = 0; return; }
-        // Leaving TRACK: the clock runs as long as TRACK is not wanted, no
-        // matter which of the other two is. Elsewhere it restarts when the
-        // target changes.
-        if (!M.since || now < M.since || (M.mode !== "track" && w !== M.want)) { M.since = now; M.want = w; return; }
-        M.want = w;
-        hold = M.mode === "track" ? CFG.trackExitMs :
-               (w === "track" ? CFG.trackEnterMs : (w === "standby" ? CFG.standbyMs : CFG.streetMs));
+        if (!M.since || now < M.since) { M.since = now; return; }
+        hold = M.mode === "track" ? CFG.trackExitMs : CFG.trackEnterMs;
         if (now - M.since >= hold) { setMode(w); }
     }
     function cycleMode(dir) {
@@ -1237,14 +1457,12 @@ body {
         spd: $("spdV"), spdI: $("spdI"), spdF: $("spdF"), thr: $("thrV"), rpm: $("rpmV"), gear: $("gearV"), gearAcc: $("gearAcc"),
         cool: $("coolV"), coolS: $("coolS"),
         gTot: $("gTotV"), gMax: $("gMax"), pk: $("pkV"),
-        gps: $("gpsV"), st: $("stV"), ses: $("sesV"),
+        gps: $("gpsV"), st: $("stV"), stBox: $("stBox"), ses: $("sesV"),
         dot: $("stDot"), stTxt: $("stTxt"), stSub: $("stSub"), stCell: $("stCell"),
-        amb: $("ambV"), ambCell: $("ambCell"),
         alerts: $("alerts"), alTop: $("alTop"),
         lock: $("lockC"), raw: $("raw"), rawRows: $("rawRows"), rawT: $("rawT"), toast: $("toast")
     };
-    el.spd._b = "vT vS";                       // view classes survive colour changes
-    el.gMax._b = "vT";
+    el.gMax._b = "vT";                         // the view class survives colour changes
     // BCM bytes -> what is shown. Anything not listed shows "-". The value
     // tables are the ones the firmware itself uses (libjcimod_bcm.so,
     // VBS_BCM_Get_PASCD_GearPosition):
@@ -1285,15 +1503,15 @@ body {
 
         v = live && c ? c.rpm : null;
         setClass(el.rpm, v === null ? "num s cDim" :
-            (v >= CFG.rpmRedline ? "num s cRed" : (v >= CFG.rpmWarn ? "num s cAmber" : "num s cWhite")));
+            (v >= shiftRpm(c) ? "num s cRed" : (v >= CFG.rpmWarn ? "num s cAmber" : "num s cWhite")));
 
         t = live && c ? gearText(c.gear, c.lever, c.gearbox) : DASH;
         setText(el.gear, t);
         setClass(el.gear, t === DASH ? "cDim" : "cWhite");
-        setBg(el.gearAcc, !live ? C_OFF : ((v !== null && v >= CFG.rpmRedline) ? C_RED :
+        setBg(el.gearAcc, !live ? C_OFF : ((v !== null && v >= shiftRpm(c)) ? C_RED :
             ((v !== null && v >= CFG.rpmWarn) ? C_AMBER : C_CYAN)));
 
-        // coolant: number, and in STANDBY the plain word for it
+        // coolant: number, and the plain word for it
         v = live && c ? c.coolant : null;
         lv = v === null ? -1 : coolLevel(v);
         setDigits(el.cool, v === null ? "--" : String(Math.round(v)));
@@ -1351,7 +1569,11 @@ body {
         else { setDigits(el.gps, stepTo(el.gps, Math.max(0, v), 0.1).toFixed(1)); }
         setClass(el.gps, v === null ? "num s cDim" : "num s cWhite");
 
+        // The steering angle has not been seen on the car yet (standing still
+        // it reports "not received"): its place stays empty until a value
+        // has come, rather than show dashes for good.
         v = live ? V.steering : null;
+        if (v !== null && !el.stBox._on) { el.stBox._on = true; el.stBox.style.visibility = "visible"; }
         if (v === null) { el.st._v = null; setDigits(el.st, "---"); }
         else { setDigits(el.st, fixed(stepTo(el.st, v, 0.1), 1, false) + "\u00b0"); }
         setClass(el.st, v === null ? "num s cDim" : "num s cWhite");
@@ -1411,14 +1633,6 @@ body {
         linkState = state;
         showView();
 
-        // outside temperature: only when the car reports one
-        v = c ? c.ambient : null;
-        if (el.ambCell._vis !== (v !== null)) {
-            el.ambCell._vis = v !== null;
-            el.ambCell.style.visibility = v !== null ? "visible" : "hidden";
-        }
-        if (v !== null) { setDigits(el.amb, fixed(Math.round(v), 0, false)); }
-
         if (rawOn) { updateRaw(now); }
         saveState();
     }
@@ -1476,13 +1690,17 @@ body {
         ["rpm", "rpm"], ["thr", "throttle"], ["steer", "steering"], ["latg", "lat_g"], ["lon", "lon_g"],
         ["cool", "coolant"], ["vss", null], ["spd", "speed"], ["#w0", "#w1"], ["#w2", "#w3"],
         ["gear", "#gear"], ["lever", "gearbox"],
-        [null, "brake"], [null, "gps_speed"], [null, "gps_heading"], [null, "#warn"],
+        // the database values whose scale is not known yet, raw: brake
+        // pressure, its learnt zero and highest, intake and outside
+        // temperature, fuel gauge, yaw rate
+        ["brkp", "brake"], ["#bp0", "#bpmax"], ["iat", "#out"], ["fuel", "#yaw"],
+        [null, "gps_speed"], [null, "gps_heading"], [null, "#warn"],
         ["#seq", "hz"], ["#sig", "#age"]
     ];
     function buildRaw() {
         var i, row, a, b, n;
         for (i = 0; i < RAW_ROWS.length; i++) {
-            row = D.createElement("div"); row.className = "rr"; row.style.top = (i * 16) + "px";
+            row = D.createElement("div"); row.className = "rr"; row.style.top = (i * 14) + "px";
             n = D.createElement("span"); n.className = "rn"; n.textContent = TXT.rows[i];
             a = D.createElement("span"); a.className = "ra";
             b = D.createElement("span"); b.className = "rb";
@@ -1500,21 +1718,28 @@ body {
         var o = S.obj || {}, r = o.raw || {}, w = o.wheels || [], i, ka, kb, a, b;
         // which daemon is feeding the page: the native one (C; "C+" once it reads the
         // shared memory database directly instead of launching smdb-read) or the shell fallback (sh)
-        setText(el.rawT, LABELS.raw + (S.obj ? (o.src === "native" ? " \u00b7 C" + (o.smdb === "direct" ? "+" : "") : " \u00b7 sh") : ""));
+        // and how the samples get here: pushed (WebSocket) or polled from the file
+        setText(el.rawT, LABELS.raw + (S.obj ? (o.src === "native" ? " \u00b7 C" + (o.smdb === "direct" ? "+" : "") : " \u00b7 sh") +
+                " \u00b7 " + (WS.live ? TXT.push : TXT.poll) : ""));
         for (i = 0; i < RAW_ROWS.length; i++) {
             ka = RAW_ROWS[i][0]; kb = RAW_ROWS[i][1];
             a = ka === null ? "" : (ka === "#seq" ? show(o.seq) : (ka === "#sig" ? show(o.sig) : show(r[ka])));
             // "#age": how far behind the data the moving parts are shown (see "Sample store and playback")
-            b = kb === null ? "" : (kb === "#age" ? (S.lastChange ? Math.round(S.delay) + " ms" : DASH) : show(o[kb]));
+            // the playback delay, then what it is made of: one period + the recent worst trip
+            b = kb === null ? "" : (kb === "#age" ? (S.lastChange ? Math.round(S.delay) + "ms " + Math.round(S.per) + "+" + Math.round(S.late) : DASH) : show(o[kb]));
             // the four wheel speeds, km/h: front left, front right, rear left, rear right
             // (the order of VBS_BCM_WheelSpeed_st in the car's own interface description)
             if (ka && ka.charAt(0) === "#" && ka.charAt(1) === "w") { a = show(w[Number(ka.charAt(2))]); }
             if (kb && kb.charAt(0) === "#" && kb.charAt(1) === "w") { b = show(w[Number(kb.charAt(2))]); }
-            // frames a second, then the two load levels: q = picture quality (2 = full),
-            // n = how often the numbers are refreshed (0 = every frame, 1 = 50 ms, 2 = 100 ms)
-            if (kb === "hz") { b = show(o.hz) + " / " + Math.round(fps) + " fps q" + quality + "n" + numLevel; }
+            // samples a second sent / received here, frames a second, then the two load levels:
+            // q = picture quality (2 = full), n = how often the numbers are refreshed
+            // (0 = every frame, 1 = 50 ms, 2 = 100 ms)
+            if (kb === "hz") { b = show(o.hz) + "/" + S.rx + " " + Math.round(fps) + "fps q" + quality + "n" + numLevel; }
             if (kb === "#warn") { b = show(o.oil_warn) + " / " + show(o.batt_warn); }
             if (kb === "#gear") { b = gearText(o.gear, o.lever, o.gearbox); }       // what the gear box shows
+            if (ka === "#bp0") { a = show(o.brake_p0); b = show(o.brake_pmax); }
+            if (kb === "#out") { b = show(r.out); }
+            if (kb === "#yaw") { b = show(r.yaw); }
             setText(rawEls[i][0], a);
             setText(rawEls[i][1], b);
         }
@@ -1526,8 +1751,10 @@ body {
             // It covers the friction circle, so it only opens standing still.
             // Once open it stays, for a passenger checking the g scale.
             if (on && live && c && c.speed !== null && c.speed > CFG.moveKmh) { toast(TXT.parked); return; }
+            if (on) { beep(); }      // the shift beep, to hear that it works and how loud it is
         }
         rawOn = on;
+        if (!rawOn) { gState.clean = false; gState.dx = -99; }   // the friction circle was not drawn under it
         if (rawOn && rawEls.length === 0) { buildRaw(); }
         el.raw.style.display = rawOn ? "block" : "none";
         if (rawOn) { updateRaw(Date.now()); }
@@ -1536,11 +1763,18 @@ body {
     // ─────────────────────────────────────────────────────────────
     // Frame loop
     // ─────────────────────────────────────────────────────────────
-    var raf = W.requestAnimationFrame || W.oRequestAnimationFrame || W.webkitRequestAnimationFrame ||
-              W.mozRequestAnimationFrame || W.msRequestAnimationFrame ||
-              function (cb) { return W.setTimeout(cb, 16); };
-    var F = { last: 0, fast: 0, med: 0, slow: 0, ema: 16, slowSince: 0, okSince: 0, skip: false, drew: false };
+    // Frames are paced at 30 a second (15 at the lowest load level), not as
+    // fast as the browser can go. The car's browser has no animation-frame
+    // timer and manages 30 to 40 frames of this page; running flat out made
+    // the rate wander and left the data waiting behind the drawing. 30 even
+    // frames show the motion of 10 samples a second smoothly.
+    var rafN = W.requestAnimationFrame || W.oRequestAnimationFrame || W.webkitRequestAnimationFrame ||
+               W.mozRequestAnimationFrame || W.msRequestAnimationFrame || null;
+    var FRAME_MS = 1000 / 30;
+    var F = { last: 0, due: 0, fast: 0, med: 0, slow: 0, ema: FRAME_MS, slowSince: 0, okSince: 0, probeAt: 0, probeWait: 20000 };
     var numLevel = 0;                         // numbers: 0 every frame, 1 every 50 ms, 2 every 100 ms
+    var level = 0;                            // load level: an index into LEVELS
+    var LEVELS = [[2, 0], [2, 1], [2, 2], [1, 2], [0, 2]];   // [quality, numLevel], lightest last
 
     // bars follow the data while live and fall back to zero when it stops
     function follow(key, target, dt) {
@@ -1551,26 +1785,38 @@ body {
             shown[key] = target;
         }
     }
-    // Presto draws the canvas in software. If frames get slow, first refresh
-    // the numbers less often (every frame, then 50 ms, then 100 ms), then drop
-    // the trail glow, then halve the frame rate; recover in the opposite
-    // order when there is headroom.
+    function framePeriod() { return quality === 0 ? 2 * FRAME_MS : FRAME_MS; }
+    function setLevel(l, now) {
+        level = l; quality = LEVELS[l][0]; numLevel = LEVELS[l][1];
+        F.ema = framePeriod(); F.slowSince = 0; F.okSince = now;
+    }
+    // Presto draws the canvas in software. A frame that takes longer than its
+    // slot makes the next one late; when frames run late for 2.5 s, go one
+    // level lighter: the numbers first (every 50 ms, then every 100 ms),
+    // then the trail glow, then 15 frames a second. Whether a heavier level
+    // would fit cannot be seen from frames that are on time, so it is tried:
+    // after 20 s on time one level up; if that one runs late within 10 s it
+    // goes back down, and the next try waits twice as long (up to 5 min).
+    // (The old rule went up only above 52 frames a second, which the car
+    // never reaches: one slow moment at power-on kept it low for good.)
     function adaptQuality(now, dt) {
+        var p = framePeriod();
         F.ema += (dt - F.ema) * 0.05;
         fps = 1000 / Math.max(1, F.ema);
-        if (F.ema > 30) {
+        if (F.ema > p * 1.15) {
             F.okSince = now;
             if (!F.slowSince) { F.slowSince = now; }
-            if (now - F.slowSince > 2500 && (numLevel < 2 || quality > 0)) {
-                if (numLevel < 2) { numLevel++; } else { quality--; }
-                F.slowSince = now;
+            if (now - F.slowSince > 2500 && level < LEVELS.length - 1) {
+                if (F.probeAt && now - F.probeAt < 10000) { F.probeWait = Math.min(F.probeWait * 2, 300000); }
+                F.probeAt = 0;
+                setLevel(level + 1, now);
             }
         } else {
             F.slowSince = 0;
-            if (!F.okSince) { F.okSince = now; }
-            if (F.ema < 19 && now - F.okSince > 20000 && (quality < 2 || numLevel > 0)) {
-                if (quality < 2) { quality++; } else { numLevel--; }
-                F.okSince = now;
+            if (F.ema > p * 1.05 || !F.okSince) { F.okSince = now; }   // only just keeping up: no room to try
+            if (level > 0 && now - F.okSince > F.probeWait) {
+                F.probeAt = now;
+                setLevel(level - 1, now);
             }
         }
     }
@@ -1586,7 +1832,13 @@ body {
         S.hist.length = 0;
         if (S.cur) { S.cur.at = now; S.hist.push(S.cur); }
         trail.n = 0; trail.lastT = 0;
-        F.slowSince = 0; F.okSince = 0;
+        F.slowSince = 0; F.okSince = 0; F.due = 0; F.probeAt = 0;
+        S.rxT = now;
+        // the push: a retry that was due soon stays due soon; a connection
+        // under way or live is timed from now
+        if (WS.next > now + WS.wait) { WS.next = now + WS.wait; }
+        if (WS.got > now) { WS.got = now; }
+        if (WS.started > now) { WS.started = now; }
     }
     // The wall clock was set: the unit starts at 1970 and gets the time from
     // GPS later, decades at once, or goes back when it ran fast. Anything that
@@ -1595,31 +1847,46 @@ body {
     // minute count as a clock change: a page that stalled for some seconds
     // under load really lost that time.)
     function clockJump(j) {
+        function mv(x) { return x ? x + j : 0; }     // 0: not set
         timer.ref += j;
         session.saveFrom += j;
         T0 += j;
         lastSel = 0; armed = 0;
+        // or the data would look 56 years old: OFFLINE for a moment, the
+        // push given up as silent, a level tried too early
+        S.lastChange = mv(S.lastChange); S.tCur = mv(S.tCur); S.okSince = mv(S.okSince); S.rxT = mv(S.rxT);
+        WS.got = mv(WS.got); WS.started = mv(WS.started); WS.next = mv(WS.next);
+        F.okSince = mv(F.okSince); F.slowSince = mv(F.slowSince); F.probeAt = mv(F.probeAt);
+        M.since = mv(M.since);
+        AL.oil.since = mv(AL.oil.since); AL.bat.since = mv(AL.bat.since); AL.tmp.since = mv(AL.tmp.since);
     }
-    function frame() {
-        var now = Date.now(), dt = F.last ? now - F.last : 16, sample = F.drew, state;
-        raf(frame);
-        if (F.last && (dt < 0 || dt > 60000)) { clockJump(dt - 16); }
-        if (dt < 0 || S.lastChange > now) { clockBack(now); }
-        if (dt < 0 || dt > 1000) { dt = 16; }         // clock jumped (GPS time sync)
-        F.last = now;
-        // dt is the interval since the previous callback, i.e. the time that
-        // callback took. Only an interval in which a frame was rendered says
-        // anything about render cost: at quality 0 the interval after a
-        // skipped frame costs ~0 ms and would drag F.ema down (quality 0 <-> 1
-        // oscillation). Measuring render-to-render instead would span a skip
-        // plus a render (>= 2 timer periods), so quality 0 could never recover.
-        if (sample) { adaptQuality(now, dt); }
-        F.drew = false;
-        if (quality === 0) {                          // slow unit: draw every other frame
-            F.skip = !F.skip;
-            if (F.skip) { return; }
+    function loop() {
+        var now = Date.now(), p = framePeriod(), wait;
+        if (rafN) {
+            rafN(loop);
+            // called at every refresh of the display (60 Hz: 16.7 ms); draw
+            // on the one closest to the slot, i.e. every second one
+            if (now < F.due - 8 && F.due - now < 2 * p) { return; }
         }
-        F.drew = true;
+        // on time or a little late: keep the rhythm (the next wait is shorter);
+        // far off (a stall, the clock was set): start it again from here
+        F.due = (now - F.due > p || F.due - now > 2 * p) ? now + p : F.due + p;
+        frame(now);
+        if (!rafN) {
+            wait = F.due - Date.now();
+            W.setTimeout(loop, wait > 1 ? wait : 1);    // at least 1 ms: the data gets its turn
+        }
+    }
+    function frame(now) {
+        var dt = F.last ? now - F.last : FRAME_MS, state;
+        if (F.last && (dt < 0 || dt > 60000)) { clockJump(dt - FRAME_MS); }
+        if (dt < 0 || S.lastChange > now) { clockBack(now); }
+        if (dt < 0 || dt > 1000) { dt = FRAME_MS; }   // clock jumped (GPS time sync)
+        F.last = now;
+        // dt: from the start of the frame before to the start of this one,
+        // i.e. what the frame before cost (script and painting) or its slot,
+        // whichever is longer
+        adaptQuality(now, dt);
 
         if (!S.cur) {
             state = (now - T0 < 2500) ? "wait" : "offline";
@@ -1646,8 +1913,8 @@ body {
         autoMode(now);
         fadeStep(now);
         if (M.mode === "track") {
-            drawGBg();
-            drawG(now);
+            // the calibration panel covers the friction circle: no use drawing it
+            if (!rawOn) { drawGBg(); drawG(now); }
             drawPedals();
             drawSteer();
         }
@@ -1727,8 +1994,8 @@ body {
     // ─────────────────────────────────────────────────────────────
     applyLabels();
     V = blank();
-    setMode("standby");
-    if (OPT.view === "standby" || OPT.view === "street" || OPT.view === "track") { M.lock = true; setMode(OPT.view); }
+    setMode("road");
+    if (OPT.view === "road" || OPT.view === "track") { M.lock = true; setMode(OPT.view); }
     AL.oil.el.textContent = TXT.oil;
     AL.bat.el.textContent = TXT.batt;
     drawBack();
@@ -1738,8 +2005,9 @@ body {
     updateNums();
     updateAlerts(Date.now());
     updateSlow(Date.now(), "wait");
+    loadConf();
     if (OPT.demo) { demoTick(); } else { poll(); }
-    raf(frame);
+    loop();
     post("ready");
 })();
 </script>

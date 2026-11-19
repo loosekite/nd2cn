@@ -70,6 +70,11 @@ nd2cn_log "Opera running: $(pidof opera 2>/dev/null || echo 'no')"
 nd2cn_log "sshd running: $(pidof sshd 2>/dev/null || echo 'no')"
 nd2cn_log "Settings cache: $(find /data/com/jci/cpp/settings -name '*.bin' 2>/dev/null | wc -l) .bin files"
 nd2cn_log "Existing nd2cn: $(cat /data/nd2cn/installed 2>/dev/null || echo 'none')"
+# what nd2cn-dashd saw while driving: the highest brake pressure, and the
+# ranges of the values whose scale is still unknown (see native/dashd.c)
+if [ -f /data/nd2cn/dashd-stats.txt ]; then
+    sed 's/^/Dash stats: /' /data/nd2cn/dashd-stats.txt 2>/dev/null | head -14 | while IFS= read -r _ds_l; do nd2cn_log "$_ds_l"; done
+fi
 nd2cn_log "GuiConfig exists: $([ -f /data/integration/developer_mode_GuiConfig.js ] && echo 'yes' || echo 'no')"
 nd2cn_log "Language XML current: $(grep LanguageDisplayStrings /jci/settings/configurations/maz_cmu-root.xml 2>/dev/null | head -1)"
 # shellcheck disable=SC2012  # diagnostic count only; plugin filenames are controlled (no newlines)
